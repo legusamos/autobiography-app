@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -48,6 +48,20 @@ function weekFromStartDate(startDateISO: string) {
   return clampWeek(Math.floor(days / 7) + 1);
 }
 
+function formatSavedTimestamp(d: Date) {
+  try {
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+  } catch {
+    return d.toISOString();
+  }
+}
+
 export default function DashboardClient() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -79,14 +93,52 @@ export default function DashboardClient() {
   const [themes, setThemes] = useState("");
 
   const [message, setMessage] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
 
   const [view, setView] = useState<"write" | "open" | "past">("write");
   const [pastSort, setPastSort] = useState<"week" | "title" | "updated">("week");
 
+  // Tracks "dirty" state to warn before leaving
+  const savedSnapshotRef = useRef<string>("");
+
+  function currentSnapshot() {
+    return JSON.stringify({
+      selectedWeek,
+      title,
+      content,
+      lifeStage,
+      tone,
+      keyPeople,
+      locations,
+      themes
+    });
+  }
+
+  const snapshot = currentSnapshot();
+  const isDirty = snapshot !== savedSnapshotRef.current;
+
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    }
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
+  function confirmDiscardIfDirty() {
+    if (!isDirty) return true;
+    return window.confirm("You have unsaved changes. Leave without saving?");
+  }
+
   async function loadEntriesForUser(userId: string) {
     const { data: entryRows, error } = await supabase
       .from("entries")
-      .select("id, user_id, prompt_key, week, title, content, status, life_stage, tone, key_people, locations, themes, updated_at, created_at")
+      .select(
+        "id, user_id, prompt_key, week, title, content, status, life_stage, tone, key_people, locations, themes, updated_at, created_at"
+      )
       .eq("user_id", userId);
 
     if (error) throw new Error(error.message);
@@ -166,6 +218,23 @@ export default function DashboardClient() {
     setKeyPeople(e?.key_people ?? "");
     setLocations(e?.locations ?? "");
     setThemes(e?.themes ?? "");
+
+    // Establish a "saved" baseline whenever a new week loads
+    const snap = JSON.stringify({
+      selectedWeek,
+      title: e?.title ?? "",
+      content: e?.content ?? "",
+      lifeStage: e?.life_stage ?? "",
+      tone: e?.tone ?? "",
+      keyPeople: e?.key_people ?? "",
+      locations: e?.locations ?? "",
+      themes: e?.themes ?? ""
+    });
+    savedSnapshotRef.current = snap;
+
+    if (e?.updated_at) setLastSavedAt(new Date(e.updated_at));
+    else setLastSavedAt(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompts, entries, selectedWeek]);
 
   const openWeeks = useMemo(() => {
@@ -201,15 +270,23 @@ export default function DashboardClient() {
     const sorted = [...filled];
     if (pastSort === "week") sorted.sort((a, b) => a.week - b.week);
     if (pastSort === "title") sorted.sort((a, b) => a.promptTitle.localeCompare(b.promptTitle));
-    if (pastSort === "updated") sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+    if (pastSort === "updated")
+      sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
     return sorted;
   }, [entries, prompts, pastSort]);
 
   function goToWeek(w: number) {
+    if (!confirmDiscardIfDirty()) return;
     const ww = clampWeek(w);
     setSelectedWeek(ww);
     setView("write");
     router.push(`/dashboard?week=${ww}`);
+  }
+
+  function switchView(next: "write" | "open" | "past") {
+    if (view === next) return;
+    if (!confirmDiscardIfDirty()) return;
+    setView(next);
   }
 
   async function save() {
@@ -242,21 +319,26 @@ export default function DashboardClient() {
         setMessage(`Save error: ${error.message}`);
         return;
       }
-      setMessage("Saved.");
     } else {
       const { error } = await supabase.from("entries").insert(payload);
       if (error) {
         setMessage(`Save error: ${error.message}`);
         return;
       }
-      setMessage("Saved.");
     }
 
-    // Refresh entries so Open/Past lists update immediately
+    const now = new Date();
+    setLastSavedAt(now);
+    setMessage(`Saved at ${formatSavedTimestamp(now)}.`);
+
     await loadEntriesForUser(auth.user.id);
+
+    // Update dirty baseline after successful save (IMPORTANT)
+    savedSnapshotRef.current = snapshot;
   }
 
   async function signOut() {
+    if (!confirmDiscardIfDirty()) return;
     await supabase.auth.signOut();
     router.push("/login");
   }
@@ -275,10 +357,10 @@ export default function DashboardClient() {
           <button className="rounded-lg border px-3 py-2" onClick={() => goToWeek(currentWeek)}>
             Continue (Current week)
           </button>
-          <button className="rounded-lg border px-3 py-2" onClick={() => setView("open")}>
+          <button className="rounded-lg border px-3 py-2" onClick={() => switchView("open")}>
             Open questions ({openWeeks.length})
           </button>
-          <button className="rounded-lg border px-3 py-2" onClick={() => setView("past")}>
+          <button className="rounded-lg border px-3 py-2" onClick={() => switchView("past")}>
             Edit past submissions ({pastEntries.length})
           </button>
           <button className="rounded-lg border px-3 py-2" onClick={signOut}>
@@ -389,75 +471,8 @@ export default function DashboardClient() {
             <div className="rounded-xl border p-4">No prompt found for Week {selectedWeek}.</div>
           )}
 
-          <div className="rounded-xl border p-4 space-y-3">
+          <div className="rounded-xl border p-4 space-y-4">
             <div className="font-semibold">Your entry</div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="text-sm">Life stage</label>
-                <select
-                  className="w-full rounded-lg border p-2"
-                  value={lifeStage}
-                  onChange={(e) => setLifeStage(e.target.value)}
-                >
-                  <option value="">Select</option>
-                  <option value="Early childhood">Early childhood</option>
-                  <option value="School years">School years</option>
-                  <option value="Young adult">Young adult</option>
-                  <option value="Early career">Early career</option>
-                  <option value="Midlife">Midlife</option>
-                  <option value="Later life">Later life</option>
-                  <option value="Reflection">Reflection</option>
-                </select>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-sm">Emotional tone</label>
-                <select className="w-full rounded-lg border p-2" value={tone} onChange={(e) => setTone(e.target.value)}>
-                  <option value="">Select</option>
-                  <option value="Joyful">Joyful</option>
-                  <option value="Grateful">Grateful</option>
-                  <option value="Proud">Proud</option>
-                  <option value="Hopeful">Hopeful</option>
-                  <option value="Neutral">Neutral</option>
-                  <option value="Bittersweet">Bittersweet</option>
-                  <option value="Sad">Sad</option>
-                  <option value="Angry">Angry</option>
-                  <option value="Anxious">Anxious</option>
-                  <option value="Regretful">Regretful</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-sm">Key people (comma-separated)</label>
-              <input
-                className="w-full rounded-lg border p-2"
-                placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
-                value={keyPeople}
-                onChange={(e) => setKeyPeople(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-sm">Locations (comma-separated)</label>
-              <input
-                className="w-full rounded-lg border p-2"
-                placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
-                value={locations}
-                onChange={(e) => setLocations(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-sm">Themes (comma-separated)</label>
-              <input
-                className="w-full rounded-lg border p-2"
-                placeholder="Example: resilience, family, faith, work ethic"
-                value={themes}
-                onChange={(e) => setThemes(e.target.value)}
-              />
-            </div>
 
             <input
               className="w-full rounded-lg border p-2"
@@ -473,12 +488,104 @@ export default function DashboardClient() {
               onChange={(e) => setContent(e.target.value)}
             />
 
+            <details className="pt-2 border-t">
+              <summary className="cursor-pointer select-none text-sm font-semibold opacity-80">
+                Add info (optional)
+              </summary>
+
+              <div className="mt-3 space-y-3">
+                <div className="text-xs opacity-70">These details help organize your story later. You can skip them.</div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs opacity-80">Life stage</label>
+                    <select
+                      className="w-full rounded-lg border p-2 text-sm"
+                      value={lifeStage}
+                      onChange={(e) => setLifeStage(e.target.value)}
+                    >
+                      <option value="">Select</option>
+                      <option value="Early childhood">Early childhood</option>
+                      <option value="School years">School years</option>
+                      <option value="Young adult">Young adult</option>
+                      <option value="Early career">Early career</option>
+                      <option value="Midlife">Midlife</option>
+                      <option value="Later life">Later life</option>
+                      <option value="Reflection">Reflection</option>
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs opacity-80">Emotional tone</label>
+                    <select
+                      className="w-full rounded-lg border p-2 text-sm"
+                      value={tone}
+                      onChange={(e) => setTone(e.target.value)}
+                    >
+                      <option value="">Select</option>
+                      <option value="Joyful">Joyful</option>
+                      <option value="Grateful">Grateful</option>
+                      <option value="Proud">Proud</option>
+                      <option value="Hopeful">Hopeful</option>
+                      <option value="Neutral">Neutral</option>
+                      <option value="Bittersweet">Bittersweet</option>
+                      <option value="Sad">Sad</option>
+                      <option value="Angry">Angry</option>
+                      <option value="Anxious">Anxious</option>
+                      <option value="Regretful">Regretful</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs opacity-80">Key people (comma-separated)</label>
+                  <input
+                    className="w-full rounded-lg border p-2 text-sm"
+                    placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
+                    value={keyPeople}
+                    onChange={(e) => setKeyPeople(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs opacity-80">Locations (comma-separated)</label>
+                  <input
+                    className="w-full rounded-lg border p-2 text-sm"
+                    placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
+                    value={locations}
+                    onChange={(e) => setLocations(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs opacity-80">Themes (comma-separated)</label>
+                  <input
+                    className="w-full rounded-lg border p-2 text-sm"
+                    placeholder="Example: resilience, family, faith, work ethic"
+                    value={themes}
+                    onChange={(e) => setThemes(e.target.value)}
+                  />
+                </div>
+              </div>
+            </details>
+
             <div className="flex items-center gap-3">
               <button className="rounded-lg border px-4 py-2 font-semibold" onClick={save}>
                 Save
               </button>
-              {entry ? <span className="text-sm opacity-80">Editing saved entry</span> : <span className="text-sm opacity-80">New entry</span>}
+              {entry ? (
+                <span className="text-sm opacity-80">Editing saved entry</span>
+              ) : (
+                <span className="text-sm opacity-80">New entry</span>
+              )}
+              {isDirty ? <span className="text-sm opacity-80">Not saved</span> : null}
             </div>
+
+            {lastSavedAt ? (
+              <div className="text-xs opacity-70">Last saved: {formatSavedTimestamp(lastSavedAt)}</div>
+            ) : (
+              <div className="text-xs opacity-70">Last saved: not yet</div>
+            )}
           </div>
         </>
       )}
