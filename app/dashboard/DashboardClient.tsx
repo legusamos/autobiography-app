@@ -22,6 +22,11 @@ type EntryRow = {
   title: string | null;
   content: string;
   status: string;
+  life_stage: string | null;
+  tone: string | null;
+  key_people: string | null;
+  locations: string | null;
+  themes: string | null;
   updated_at?: string;
   created_at?: string;
 };
@@ -66,10 +71,27 @@ export default function DashboardClient() {
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
+
+  const [lifeStage, setLifeStage] = useState("");
+  const [tone, setTone] = useState("");
+  const [keyPeople, setKeyPeople] = useState("");
+  const [locations, setLocations] = useState("");
+  const [themes, setThemes] = useState("");
+
   const [message, setMessage] = useState<string | null>(null);
 
   const [view, setView] = useState<"write" | "open" | "past">("write");
   const [pastSort, setPastSort] = useState<"week" | "title" | "updated">("week");
+
+  async function loadEntriesForUser(userId: string) {
+    const { data: entryRows, error } = await supabase
+      .from("entries")
+      .select("id, user_id, prompt_key, week, title, content, status, life_stage, tone, key_people, locations, themes, updated_at, created_at")
+      .eq("user_id", userId);
+
+    if (error) throw new Error(error.message);
+    setEntries((entryRows ?? []) as EntryRow[]);
+  }
 
   useEffect(() => {
     async function loadAll() {
@@ -95,7 +117,7 @@ export default function DashboardClient() {
       }
 
       const prof = profile as ProfileRow;
-      const cw = prof.start_date ? weekFromStartDate(prof.start_date) : 1;
+      const cw = prof?.start_date ? weekFromStartDate(prof.start_date) : 1;
       setCurrentWeek(cw);
 
       const initialWeek = weekParam ?? cw;
@@ -115,18 +137,14 @@ export default function DashboardClient() {
 
       setPrompts((promptRows ?? []) as PromptRow[]);
 
-      const { data: entryRows, error: entryErr } = await supabase
-        .from("entries")
-        .select("id, user_id, prompt_key, week, title, content, status, updated_at, created_at")
-        .eq("user_id", auth.user.id);
-
-      if (entryErr) {
-        setMessage(`Entry list error: ${entryErr.message}`);
+      try {
+        await loadEntriesForUser(auth.user.id);
+      } catch (e: any) {
+        setMessage(`Entry list error: ${e.message}`);
         setLoading(false);
         return;
       }
 
-      setEntries((entryRows ?? []) as EntryRow[]);
       setLoading(false);
     }
 
@@ -134,7 +152,6 @@ export default function DashboardClient() {
   }, [router, weekParam]);
 
   useEffect(() => {
-    // When selectedWeek changes, load the prompt and entry from in-memory lists
     const p = prompts.find((x) => x.week === selectedWeek) ?? null;
     setPrompt(p);
 
@@ -143,10 +160,15 @@ export default function DashboardClient() {
 
     setTitle(e?.title ?? "");
     setContent(e?.content ?? "");
+
+    setLifeStage(e?.life_stage ?? "");
+    setTone(e?.tone ?? "");
+    setKeyPeople(e?.key_people ?? "");
+    setLocations(e?.locations ?? "");
+    setThemes(e?.themes ?? "");
   }, [prompts, entries, selectedWeek]);
 
   const openWeeks = useMemo(() => {
-    // Prompt exists but no entry, or entry content is blank
     const byWeek = new Map<number, EntryRow>();
     for (const e of entries) byWeek.set(e.week, e);
 
@@ -156,11 +178,7 @@ export default function DashboardClient() {
         if (!e) return true;
         return (e.content ?? "").trim().length === 0;
       })
-      .map((p) => ({
-        week: p.week,
-        title: p.title,
-        prompt_key: p.prompt_key
-      }));
+      .map((p) => ({ week: p.week, title: p.title }));
   }, [prompts, entries]);
 
   const pastEntries = useMemo(() => {
@@ -172,22 +190,18 @@ export default function DashboardClient() {
       .map((e) => {
         const p = promptByWeek.get(e.week);
         return {
+          id: e.id,
           week: e.week,
           promptTitle: p?.title ?? `Week ${e.week}`,
           entryTitle: e.title ?? "",
-          updated_at: e.updated_at ?? "",
-          id: e.id
+          updated_at: e.updated_at ?? ""
         };
       });
 
     const sorted = [...filled];
-    if (pastSort === "week") {
-      sorted.sort((a, b) => a.week - b.week);
-    } else if (pastSort === "title") {
-      sorted.sort((a, b) => a.promptTitle.localeCompare(b.promptTitle));
-    } else {
-      sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
-    }
+    if (pastSort === "week") sorted.sort((a, b) => a.week - b.week);
+    if (pastSort === "title") sorted.sort((a, b) => a.promptTitle.localeCompare(b.promptTitle));
+    if (pastSort === "updated") sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
     return sorted;
   }, [entries, prompts, pastSort]);
 
@@ -214,22 +228,32 @@ export default function DashboardClient() {
       week: prompt.week,
       title: title || null,
       content: content || "",
-      status: "draft"
+      status: "draft",
+      life_stage: lifeStage || null,
+      tone: tone || null,
+      key_people: keyPeople || null,
+      locations: locations || null,
+      themes: themes || null
     };
 
     if (entry) {
       const { error } = await supabase.from("entries").update(payload).eq("id", entry.id);
-      if (error) setMessage(`Save error: ${error.message}`);
-      else setMessage("Saved.");
-    } else {
-      const { data, error } = await supabase.from("entries").insert(payload).select().single();
-      if (error) setMessage(`Save error: ${error.message}`);
-      else {
-        setMessage("Saved.");
-        // Refresh the entry list locally by appending
-        setEntries((prev) => [...prev, data as EntryRow]);
+      if (error) {
+        setMessage(`Save error: ${error.message}`);
+        return;
       }
+      setMessage("Saved.");
+    } else {
+      const { error } = await supabase.from("entries").insert(payload);
+      if (error) {
+        setMessage(`Save error: ${error.message}`);
+        return;
+      }
+      setMessage("Saved.");
     }
+
+    // Refresh entries so Open/Past lists update immediately
+    await loadEntriesForUser(auth.user.id);
   }
 
   async function signOut() {
@@ -367,6 +391,73 @@ export default function DashboardClient() {
 
           <div className="rounded-xl border p-4 space-y-3">
             <div className="font-semibold">Your entry</div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-sm">Life stage</label>
+                <select
+                  className="w-full rounded-lg border p-2"
+                  value={lifeStage}
+                  onChange={(e) => setLifeStage(e.target.value)}
+                >
+                  <option value="">Select</option>
+                  <option value="Early childhood">Early childhood</option>
+                  <option value="School years">School years</option>
+                  <option value="Young adult">Young adult</option>
+                  <option value="Early career">Early career</option>
+                  <option value="Midlife">Midlife</option>
+                  <option value="Later life">Later life</option>
+                  <option value="Reflection">Reflection</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm">Emotional tone</label>
+                <select className="w-full rounded-lg border p-2" value={tone} onChange={(e) => setTone(e.target.value)}>
+                  <option value="">Select</option>
+                  <option value="Joyful">Joyful</option>
+                  <option value="Grateful">Grateful</option>
+                  <option value="Proud">Proud</option>
+                  <option value="Hopeful">Hopeful</option>
+                  <option value="Neutral">Neutral</option>
+                  <option value="Bittersweet">Bittersweet</option>
+                  <option value="Sad">Sad</option>
+                  <option value="Angry">Angry</option>
+                  <option value="Anxious">Anxious</option>
+                  <option value="Regretful">Regretful</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm">Key people (comma-separated)</label>
+              <input
+                className="w-full rounded-lg border p-2"
+                placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
+                value={keyPeople}
+                onChange={(e) => setKeyPeople(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm">Locations (comma-separated)</label>
+              <input
+                className="w-full rounded-lg border p-2"
+                placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
+                value={locations}
+                onChange={(e) => setLocations(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm">Themes (comma-separated)</label>
+              <input
+                className="w-full rounded-lg border p-2"
+                placeholder="Example: resilience, family, faith, work ethic"
+                value={themes}
+                onChange={(e) => setThemes(e.target.value)}
+              />
+            </div>
 
             <input
               className="w-full rounded-lg border p-2"
