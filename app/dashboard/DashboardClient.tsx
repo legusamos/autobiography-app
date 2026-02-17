@@ -71,7 +71,6 @@ function formatSavedTimestamp(d: Date) {
 }
 
 function normalizeEntryStatus(raw: string | null | undefined): EntryStatusMode {
-  // Backward compatible: "draft" becomes "in_progress"
   if (!raw) return "in_progress";
   if (raw === "complete") return "complete";
   return "in_progress";
@@ -164,12 +163,6 @@ export default function DashboardClient() {
 
     if (error) throw new Error(error.message);
     setEntries((entryRows ?? []) as EntryRow[]);
-  }
-
-  async function savePrefsToProfile(prefs: Partial<Pick<ProfilePrefsRow, "ui_text_size" | "ui_contrast">>) {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
-    await supabase.from("profiles").update(prefs).eq("id", auth.user.id);
   }
 
   function goToProfile() {
@@ -474,29 +467,7 @@ export default function DashboardClient() {
               </button>
             </div>
 
-            <div className="flex gap-2 flex-wrap justify-end">
-              <button
-                className={buttonClass}
-                onClick={() => {
-                  const next = textSize === "normal" ? "large" : "normal";
-                  setTextSize(next);
-                  void savePrefsToProfile({ ui_text_size: next });
-                }}
-              >
-                Text: {textSize === "normal" ? "Normal" : "Large"}
-              </button>
-
-              <button
-                className={buttonClass}
-                onClick={() => {
-                  const next = contrast === "default" ? "high" : "default";
-                  setContrast(next);
-                  void savePrefsToProfile({ ui_contrast: next });
-                }}
-              >
-                Contrast: {contrast === "default" ? "Default" : "High"}
-              </button>
-            </div>
+            {/* Text/Contrast controls removed (now managed in Profile) */}
           </div>
         </div>
 
