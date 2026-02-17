@@ -31,9 +31,14 @@ type EntryRow = {
   created_at?: string;
 };
 
-type ProfileRow = {
+type ProfilePrefsRow = {
   start_date: string | null;
+  ui_text_size: "normal" | "large" | null;
+  ui_contrast: "default" | "high" | null;
 };
+
+type TextSizeMode = "normal" | "large";
+type ContrastMode = "default" | "high";
 
 function clampWeek(n: number) {
   if (!Number.isFinite(n)) return 1;
@@ -98,8 +103,13 @@ export default function DashboardClient() {
   const [view, setView] = useState<"write" | "open" | "past">("write");
   const [pastSort, setPastSort] = useState<"week" | "title" | "updated">("week");
 
+  // Preferences come from profile now
+  const [textSize, setTextSize] = useState<TextSizeMode>("normal");
+  const [contrast, setContrast] = useState<ContrastMode>("default");
+
   // Tracks "dirty" state to warn before leaving
   const savedSnapshotRef = useRef<string>("");
+  const isSavingRef = useRef(false);
 
   function currentSnapshot() {
     return JSON.stringify({
@@ -145,6 +155,17 @@ export default function DashboardClient() {
     setEntries((entryRows ?? []) as EntryRow[]);
   }
 
+  async function savePrefsToProfile(prefs: Partial<Pick<ProfilePrefsRow, "ui_text_size" | "ui_contrast">>) {
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) return;
+    await supabase.from("profiles").update(prefs).eq("id", auth.user.id);
+  }
+
+  function goToProfile() {
+    if (!confirmDiscardIfDirty()) return;
+    router.push("/profile");
+  }
+
   useEffect(() => {
     async function loadAll() {
       setLoading(true);
@@ -158,7 +179,7 @@ export default function DashboardClient() {
 
       const { data: profile, error: profErr } = await supabase
         .from("profiles")
-        .select("start_date")
+        .select("start_date, ui_text_size, ui_contrast")
         .eq("id", auth.user.id)
         .single();
 
@@ -168,9 +189,12 @@ export default function DashboardClient() {
         return;
       }
 
-      const prof = profile as ProfileRow;
+      const prof = profile as ProfilePrefsRow;
       const cw = prof?.start_date ? weekFromStartDate(prof.start_date) : 1;
       setCurrentWeek(cw);
+
+      setTextSize(prof?.ui_text_size === "large" ? "large" : "normal");
+      setContrast(prof?.ui_contrast === "high" ? "high" : "default");
 
       const initialWeek = weekParam ?? cw;
       setSelectedWeek(initialWeek);
@@ -219,7 +243,6 @@ export default function DashboardClient() {
     setLocations(e?.locations ?? "");
     setThemes(e?.themes ?? "");
 
-    // Establish a "saved" baseline whenever a new week loads
     const snap = JSON.stringify({
       selectedWeek,
       title: e?.title ?? "",
@@ -289,53 +312,78 @@ export default function DashboardClient() {
     setView(next);
   }
 
-  async function save() {
-    setMessage(null);
-
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) {
-      router.push("/login");
-      return;
-    }
+  async function saveInternal(mode: "manual" | "auto") {
+    if (isSavingRef.current) return;
     if (!prompt) return;
 
-    const payload = {
-      user_id: auth.user.id,
-      prompt_key: prompt.prompt_key,
-      week: prompt.week,
-      title: title || null,
-      content: content || "",
-      status: "draft",
-      life_stage: lifeStage || null,
-      tone: tone || null,
-      key_people: keyPeople || null,
-      locations: locations || null,
-      themes: themes || null
-    };
+    isSavingRef.current = true;
+    try {
+      const { data: auth } = await supabase.auth.getUser();
+      if (!auth.user) {
+        router.push("/login");
+        return;
+      }
 
-    if (entry) {
-      const { error } = await supabase.from("entries").update(payload).eq("id", entry.id);
-      if (error) {
-        setMessage(`Save error: ${error.message}`);
-        return;
+      const payload = {
+        user_id: auth.user.id,
+        prompt_key: prompt.prompt_key,
+        week: prompt.week,
+        title: title || null,
+        content: content || "",
+        status: "draft",
+        life_stage: lifeStage || null,
+        tone: tone || null,
+        key_people: keyPeople || null,
+        locations: locations || null,
+        themes: themes || null
+      };
+
+      if (entry) {
+        const { error } = await supabase.from("entries").update(payload).eq("id", entry.id);
+        if (error) {
+          if (mode === "manual") setMessage(`Save error: ${error.message}`);
+          return;
+        }
+      } else {
+        const { error } = await supabase.from("entries").insert(payload);
+        if (error) {
+          if (mode === "manual") setMessage(`Save error: ${error.message}`);
+          return;
+        }
       }
-    } else {
-      const { error } = await supabase.from("entries").insert(payload);
-      if (error) {
-        setMessage(`Save error: ${error.message}`);
-        return;
-      }
+
+      const now = new Date();
+      setLastSavedAt(now);
+
+      if (mode === "manual") setMessage(`Saved at ${formatSavedTimestamp(now)}.`);
+      else setMessage(null);
+
+      await loadEntriesForUser(auth.user.id);
+
+      savedSnapshotRef.current = snapshot;
+    } finally {
+      isSavingRef.current = false;
     }
-
-    const now = new Date();
-    setLastSavedAt(now);
-    setMessage(`Saved at ${formatSavedTimestamp(now)}.`);
-
-    await loadEntriesForUser(auth.user.id);
-
-    // Update dirty baseline after successful save (IMPORTANT)
-    savedSnapshotRef.current = snapshot;
   }
+
+  async function save() {
+    setMessage(null);
+    await saveInternal("manual");
+  }
+
+  useEffect(() => {
+    if (view !== "write") return;
+
+    const id = window.setInterval(() => {
+      if (!isDirty) return;
+      const hasAnyText = (title ?? "").trim().length > 0 || (content ?? "").trim().length > 0;
+      if (!hasAnyText) return;
+      void saveInternal("auto");
+    }, 30_000);
+
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, isDirty, title, content, lifeStage, tone, keyPeople, locations, themes, prompt, entry, snapshot]);
 
   async function signOut() {
     if (!confirmDiscardIfDirty()) return;
@@ -345,250 +393,311 @@ export default function DashboardClient() {
 
   if (loading) return <div className="p-6">Loading...</div>;
 
+  const high = contrast === "high";
+
+  const pageClass = high ? "bg-black text-white min-h-screen" : "min-h-screen";
+  const cardClass = high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4";
+  const inputClass = high
+    ? "w-full rounded-lg border border-white bg-black text-white p-2"
+    : "w-full rounded-lg border p-2";
+  const smallInputClass = high
+    ? "w-full rounded-lg border border-white bg-black text-white p-2 text-sm"
+    : "w-full rounded-lg border p-2 text-sm";
+  const buttonClass = high ? "rounded-lg border border-white px-3 py-2" : "rounded-lg border px-3 py-2";
+  const primaryButtonClass = high
+    ? "rounded-lg bg-white text-black px-4 py-2 font-semibold"
+    : "rounded-lg border px-4 py-2 font-semibold";
+
+  const contentClass = textSize === "large" ? "text-lg leading-relaxed" : "text-base";
+
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-6">
-      <div className="flex justify-between items-center gap-3 flex-wrap">
-        <div>
-          <div className="text-sm opacity-80">Current week: {currentWeek}</div>
-          <h1 className="text-2xl font-semibold">Week {selectedWeek}</h1>
-        </div>
-
-        <div className="flex gap-2 flex-wrap">
-          <button className="rounded-lg border px-3 py-2" onClick={() => goToWeek(currentWeek)}>
-            Continue (Current week)
-          </button>
-          <button className="rounded-lg border px-3 py-2" onClick={() => switchView("open")}>
-            Open questions ({openWeeks.length})
-          </button>
-          <button className="rounded-lg border px-3 py-2" onClick={() => switchView("past")}>
-            Edit past submissions ({pastEntries.length})
-          </button>
-          <button className="rounded-lg border px-3 py-2" onClick={signOut}>
-            Sign out
-          </button>
-        </div>
-      </div>
-
-      {message && <div className="rounded-lg border p-3 text-sm">{message}</div>}
-
-      {view === "open" && (
-        <div className="rounded-xl border p-4 space-y-3">
-          <div className="text-xl font-semibold">Open questions</div>
-          {openWeeks.length === 0 ? (
-            <div className="text-sm opacity-80">You are caught up.</div>
-          ) : (
-            <div className="space-y-2">
-              {openWeeks.map((x) => (
-                <div key={x.week} className="flex items-center justify-between gap-3 border rounded-lg p-3">
-                  <div>
-                    <div className="font-semibold">Week {x.week}</div>
-                    <div className="text-sm opacity-80">{x.title}</div>
-                  </div>
-                  <button className="rounded-lg border px-3 py-2" onClick={() => goToWeek(x.week)}>
-                    Start
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {view === "past" && (
-        <div className="rounded-xl border p-4 space-y-3">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="text-xl font-semibold">Edit past submissions</div>
-            <div className="flex gap-2 flex-wrap">
-              <button
-                className={`rounded-lg border px-3 py-2 ${pastSort === "week" ? "font-semibold" : ""}`}
-                onClick={() => setPastSort("week")}
-              >
-                Sort by week
-              </button>
-              <button
-                className={`rounded-lg border px-3 py-2 ${pastSort === "title" ? "font-semibold" : ""}`}
-                onClick={() => setPastSort("title")}
-              >
-                Sort by question
-              </button>
-              <button
-                className={`rounded-lg border px-3 py-2 ${pastSort === "updated" ? "font-semibold" : ""}`}
-                onClick={() => setPastSort("updated")}
-              >
-                Sort by last edit
-              </button>
+    <div className={`${pageClass} ${contentClass}`}>
+      <div className="max-w-3xl mx-auto p-6 space-y-6">
+        <div className="flex justify-between items-start gap-3 flex-wrap">
+          <div className="space-y-1">
+            <div className={high ? "text-sm" : "text-sm opacity-80"}>Current week: {currentWeek}</div>
+            <h1 className="text-2xl font-semibold">Week {selectedWeek}</h1>
+            <div className={high ? "text-sm" : "text-sm opacity-80"}>
+              Write as much or as little as you want. Short answers are fine.
             </div>
           </div>
 
-          {pastEntries.length === 0 ? (
-            <div className="text-sm opacity-80">No completed entries yet.</div>
-          ) : (
-            <div className="space-y-2">
-              {pastEntries.map((x) => (
-                <div key={x.id} className="flex items-center justify-between gap-3 border rounded-lg p-3">
-                  <div>
-                    <div className="font-semibold">Week {x.week}</div>
-                    <div className="text-sm opacity-80">{x.promptTitle}</div>
-                    {x.entryTitle ? <div className="text-sm">Entry title: {x.entryTitle}</div> : null}
-                  </div>
-                  <button className="rounded-lg border px-3 py-2" onClick={() => goToWeek(x.week)}>
-                    Edit
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {view === "write" && (
-        <>
-          {prompt ? (
-            <div className="rounded-xl border p-4 space-y-3">
-              <div className="text-sm opacity-80">{prompt.category}</div>
-              <div className="text-xl font-semibold">{prompt.title}</div>
-              <div className="text-sm">{prompt.coaching}</div>
-
-              <div className="space-y-2">
-                <div className="font-semibold">Main questions</div>
-                <ul className="list-disc pl-6 space-y-1">
-                  {prompt.questions.map((q, i) => (
-                    <li key={i}>{q}</li>
-                  ))}
-                </ul>
-              </div>
-
-              <div className="space-y-2">
-                <div className="font-semibold">Helpful follow ups</div>
-                <ul className="list-disc pl-6 space-y-1">
-                  {prompt.helpful_followups.map((q, i) => (
-                    <li key={i}>{q}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-xl border p-4">No prompt found for Week {selectedWeek}.</div>
-          )}
-
-          <div className="rounded-xl border p-4 space-y-4">
-            <div className="font-semibold">Your entry</div>
-
-            <input
-              className="w-full rounded-lg border p-2"
-              placeholder="Optional title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-
-            <textarea
-              className="w-full rounded-lg border p-2 min-h-[260px]"
-              placeholder="Write here..."
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-            />
-
-            <details className="pt-2 border-t">
-              <summary className="cursor-pointer select-none text-sm font-semibold opacity-80">
-                Add info (optional)
-              </summary>
-
-              <div className="mt-3 space-y-3">
-                <div className="text-xs opacity-70">These details help organize your story later. You can skip them.</div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <label className="text-xs opacity-80">Life stage</label>
-                    <select
-                      className="w-full rounded-lg border p-2 text-sm"
-                      value={lifeStage}
-                      onChange={(e) => setLifeStage(e.target.value)}
-                    >
-                      <option value="">Select</option>
-                      <option value="Early childhood">Early childhood</option>
-                      <option value="School years">School years</option>
-                      <option value="Young adult">Young adult</option>
-                      <option value="Early career">Early career</option>
-                      <option value="Midlife">Midlife</option>
-                      <option value="Later life">Later life</option>
-                      <option value="Reflection">Reflection</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-xs opacity-80">Emotional tone</label>
-                    <select
-                      className="w-full rounded-lg border p-2 text-sm"
-                      value={tone}
-                      onChange={(e) => setTone(e.target.value)}
-                    >
-                      <option value="">Select</option>
-                      <option value="Joyful">Joyful</option>
-                      <option value="Grateful">Grateful</option>
-                      <option value="Proud">Proud</option>
-                      <option value="Hopeful">Hopeful</option>
-                      <option value="Neutral">Neutral</option>
-                      <option value="Bittersweet">Bittersweet</option>
-                      <option value="Sad">Sad</option>
-                      <option value="Angry">Angry</option>
-                      <option value="Anxious">Anxious</option>
-                      <option value="Regretful">Regretful</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs opacity-80">Key people (comma-separated)</label>
-                  <input
-                    className="w-full rounded-lg border p-2 text-sm"
-                    placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
-                    value={keyPeople}
-                    onChange={(e) => setKeyPeople(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs opacity-80">Locations (comma-separated)</label>
-                  <input
-                    className="w-full rounded-lg border p-2 text-sm"
-                    placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
-                    value={locations}
-                    onChange={(e) => setLocations(e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs opacity-80">Themes (comma-separated)</label>
-                  <input
-                    className="w-full rounded-lg border p-2 text-sm"
-                    placeholder="Example: resilience, family, faith, work ethic"
-                    value={themes}
-                    onChange={(e) => setThemes(e.target.value)}
-                  />
-                </div>
-              </div>
-            </details>
-
-            <div className="flex items-center gap-3">
-              <button className="rounded-lg border px-4 py-2 font-semibold" onClick={save}>
-                Save
+          <div className="flex flex-col gap-2 items-end">
+            <div className="flex gap-2 flex-wrap justify-end">
+              <button className={buttonClass} onClick={() => goToWeek(currentWeek)}>
+                Continue (Current week)
               </button>
-              {entry ? (
-                <span className="text-sm opacity-80">Editing saved entry</span>
-              ) : (
-                <span className="text-sm opacity-80">New entry</span>
-              )}
-              {isDirty ? <span className="text-sm opacity-80">Not saved</span> : null}
+              <button className={buttonClass} onClick={() => switchView("open")}>
+                Open questions ({openWeeks.length})
+              </button>
+              <button className={buttonClass} onClick={() => switchView("past")}>
+                Edit past submissions ({pastEntries.length})
+              </button>
+
+              {/* FIX: Profile now prompts before navigating */}
+              <button className={buttonClass} onClick={goToProfile}>
+                Profile
+              </button>
+
+              <button className={buttonClass} onClick={signOut}>
+                Sign out
+              </button>
             </div>
 
-            {lastSavedAt ? (
-              <div className="text-xs opacity-70">Last saved: {formatSavedTimestamp(lastSavedAt)}</div>
+            <div className="flex gap-2 flex-wrap justify-end">
+              <button
+                className={buttonClass}
+                onClick={() => {
+                  const next = textSize === "normal" ? "large" : "normal";
+                  setTextSize(next);
+                  void savePrefsToProfile({ ui_text_size: next });
+                }}
+              >
+                Text: {textSize === "normal" ? "Normal" : "Large"}
+              </button>
+
+              <button
+                className={buttonClass}
+                onClick={() => {
+                  const next = contrast === "default" ? "high" : "default";
+                  setContrast(next);
+                  void savePrefsToProfile({ ui_contrast: next });
+                }}
+              >
+                Contrast: {contrast === "default" ? "Default" : "High"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {message && <div className={cardClass}>{message}</div>}
+
+        {view === "open" && (
+          <div className={cardClass}>
+            <div className="text-xl font-semibold">Open questions</div>
+            <div className={high ? "text-sm" : "text-sm opacity-80"}>
+              These are weeks you have not answered yet. You can do them in any order.
+            </div>
+
+            {openWeeks.length === 0 ? (
+              <div className={high ? "text-sm" : "text-sm opacity-80"}>You are caught up.</div>
             ) : (
-              <div className="text-xs opacity-70">Last saved: not yet</div>
+              <div className="space-y-2 mt-3">
+                {openWeeks.map((x) => (
+                  <div
+                    key={x.week}
+                    className={
+                      high
+                        ? "border border-white rounded-lg p-3 flex items-center justify-between gap-3"
+                        : "border rounded-lg p-3 flex items-center justify-between gap-3"
+                    }
+                  >
+                    <div>
+                      <div className="font-semibold">Week {x.week}</div>
+                      <div className={high ? "text-sm" : "text-sm opacity-80"}>{x.title}</div>
+                    </div>
+                    <button className={buttonClass} onClick={() => goToWeek(x.week)}>
+                      Start
+                    </button>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
-        </>
-      )}
+        )}
+
+        {view === "past" && (
+          <div className={cardClass}>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-xl font-semibold">Edit past submissions</div>
+                <div className={high ? "text-sm" : "text-sm opacity-80"}>
+                  You can revisit anything you have already written.
+                </div>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <button className={buttonClass} onClick={() => setPastSort("week")}>
+                  Sort by week
+                </button>
+                <button className={buttonClass} onClick={() => setPastSort("title")}>
+                  Sort by question
+                </button>
+                <button className={buttonClass} onClick={() => setPastSort("updated")}>
+                  Sort by last edit
+                </button>
+              </div>
+            </div>
+
+            {pastEntries.length === 0 ? (
+              <div className={high ? "text-sm" : "text-sm opacity-80"}>No completed entries yet.</div>
+            ) : (
+              <div className="space-y-2 mt-3">
+                {pastEntries.map((x) => (
+                  <div
+                    key={x.id}
+                    className={
+                      high
+                        ? "border border-white rounded-lg p-3 flex items-center justify-between gap-3"
+                        : "border rounded-lg p-3 flex items-center justify-between gap-3"
+                    }
+                  >
+                    <div>
+                      <div className="font-semibold">Week {x.week}</div>
+                      <div className={high ? "text-sm" : "text-sm opacity-80"}>{x.promptTitle}</div>
+                      {x.entryTitle ? (
+                        <div className={high ? "text-sm" : "text-sm"}>Entry title: {x.entryTitle}</div>
+                      ) : null}
+                    </div>
+                    <button className={buttonClass} onClick={() => goToWeek(x.week)}>
+                      Edit
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {view === "write" && (
+          <>
+            {prompt ? (
+              <div className={cardClass}>
+                <div className={high ? "text-sm" : "text-sm opacity-80"}>{prompt.category}</div>
+                <div className="text-xl font-semibold">{prompt.title}</div>
+                <div className={high ? "text-sm" : "text-sm"}>{prompt.coaching}</div>
+
+                <div className="space-y-2 mt-3">
+                  <div className="font-semibold">Main questions</div>
+                  <ul className="list-disc pl-6 space-y-1">
+                    {prompt.questions.map((q, i) => (
+                      <li key={i}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="space-y-2 mt-3">
+                  <div className="font-semibold">Helpful follow ups</div>
+                  <ul className="list-disc pl-6 space-y-1">
+                    {prompt.helpful_followups.map((q, i) => (
+                      <li key={i}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className={high ? "text-sm mt-3" : "text-sm opacity-80 mt-3"}>
+                  If you are not sure what to write, start with a few sentences. You can add more later.
+                </div>
+              </div>
+            ) : (
+              <div className={cardClass}>No prompt found for Week {selectedWeek}.</div>
+            )}
+
+            <div className={cardClass}>
+              <div className="font-semibold">Your entry</div>
+
+              <div className="mt-3 space-y-3">
+                <input
+                  className={inputClass}
+                  placeholder="Optional title"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+
+                <textarea
+                  className={inputClass + " min-h-[260px]"}
+                  placeholder="Write here..."
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                />
+
+                <details className="pt-2">
+                  <summary className={high ? "cursor-pointer select-none text-sm font-semibold" : "cursor-pointer select-none text-sm font-semibold opacity-80"}>
+                    Add info (optional)
+                  </summary>
+
+                  <div className="mt-3 space-y-3">
+                    <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                      These details help organize your story later. You can skip them.
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className={high ? "text-xs" : "text-xs opacity-80"}>Life stage</label>
+                        <select className={smallInputClass} value={lifeStage} onChange={(e) => setLifeStage(e.target.value)}>
+                          <option value="">Select</option>
+                          <option value="Early childhood">Early childhood</option>
+                          <option value="School years">School years</option>
+                          <option value="Young adult">Young adult</option>
+                          <option value="Early career">Early career</option>
+                          <option value="Midlife">Midlife</option>
+                          <option value="Later life">Later life</option>
+                          <option value="Reflection">Reflection</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={high ? "text-xs" : "text-xs opacity-80"}>Emotional tone</label>
+                        <select className={smallInputClass} value={tone} onChange={(e) => setTone(e.target.value)}>
+                          <option value="">Select</option>
+                          <option value="Joyful">Joyful</option>
+                          <option value="Grateful">Grateful</option>
+                          <option value="Proud">Proud</option>
+                          <option value="Hopeful">Hopeful</option>
+                          <option value="Neutral">Neutral</option>
+                          <option value="Bittersweet">Bittersweet</option>
+                          <option value="Sad">Sad</option>
+                          <option value="Angry">Angry</option>
+                          <option value="Anxious">Anxious</option>
+                          <option value="Regretful">Regretful</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Key people (comma-separated)</label>
+                      <input className={smallInputClass} placeholder="Example: Mom, Grandpa Ed, Coach Thompson" value={keyPeople} onChange={(e) => setKeyPeople(e.target.value)} />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Locations (comma-separated)</label>
+                      <input className={smallInputClass} placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning" value={locations} onChange={(e) => setLocations(e.target.value)} />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Themes (comma-separated)</label>
+                      <input className={smallInputClass} placeholder="Example: resilience, family, faith, work ethic" value={themes} onChange={(e) => setThemes(e.target.value)} />
+                    </div>
+                  </div>
+                </details>
+
+                <div className={high ? "text-sm" : "text-sm opacity-80"}>
+                  When you click Save, it is stored safely. Auto-save also runs while you write.
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button className={primaryButtonClass} onClick={save}>
+                    Save
+                  </button>
+
+                  {entry ? (
+                    <span className={high ? "text-sm" : "text-sm opacity-80"}>Editing saved entry</span>
+                  ) : (
+                    <span className={high ? "text-sm" : "text-sm opacity-80"}>New entry</span>
+                  )}
+
+                  {isDirty ? <span className={high ? "text-sm" : "text-sm opacity-80"}>Not saved</span> : null}
+                </div>
+
+                {lastSavedAt ? (
+                  <div className={high ? "text-xs" : "text-xs opacity-70"}>Last saved: {formatSavedTimestamp(lastSavedAt)}</div>
+                ) : (
+                  <div className={high ? "text-xs" : "text-xs opacity-70"}>Last saved: not yet</div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
