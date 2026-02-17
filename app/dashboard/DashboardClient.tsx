@@ -165,7 +165,10 @@ export default function DashboardClient() {
     if (!confirmDiscardIfDirty()) return;
     router.push("/profile");
   }
-
+  function goToQuestions() {
+    if (!confirmDiscardIfDirty()) return;
+    router.push("/questions");
+  }
   useEffect(() => {
     async function loadAll() {
       setLoading(true);
@@ -426,6 +429,9 @@ export default function DashboardClient() {
             <div className="flex gap-2 flex-wrap justify-end">
               <button className={buttonClass} onClick={() => goToWeek(currentWeek)}>
                 Continue (Current week)
+              </button>
+                            <button className={buttonClass} onClick={goToQuestions}>
+                All Questions
               </button>
               <button className={buttonClass} onClick={() => switchView("open")}>
                 Open questions ({openWeeks.length})
