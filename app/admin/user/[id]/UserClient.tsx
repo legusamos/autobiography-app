@@ -22,8 +22,13 @@ type EntryRow = {
   week: number;
   title: string | null;
   content: string;
-  updated_at: string;
-  created_at: string;
+  life_stage: string | null;
+  tone: string | null;
+  key_people: string | null;
+  locations: string | null;
+  themes: string | null;
+  updated_at: string | null;
+  created_at: string | null;
 };
 
 export default function UserClient() {
@@ -51,7 +56,7 @@ export default function UserClient() {
 
       const { data: auth } = await supabase.auth.getUser();
       if (!auth.user) {
-        router.push(`/login?next=${encodeURIComponent(`/admin/user/${userId}`)}`);
+        router.push(`/login?next=${encodeURIComponent(`/admin/user/${userId ?? ""}`)}`);
         return;
       }
 
@@ -109,7 +114,7 @@ export default function UserClient() {
 
       const { data: er, error: eErr } = await supabase
         .from("entries")
-        .select("id, week, title, content, updated_at, created_at")
+        .select("id, week, title, content, life_stage, tone, key_people, locations, themes, updated_at, created_at")
         .eq("user_id", userId)
         .order("week", { ascending: true });
 
@@ -127,25 +132,41 @@ export default function UserClient() {
   }, [router, userId]);
 
   function exportJson() {
+    if (!target) return;
+
     const payload = {
       exported_at: new Date().toISOString(),
-      user: target,
+      user: {
+        id: target.id,
+        email: target.email,
+        role: target.role
+      },
       entries: entries.map((e) => ({
         week: e.week,
         prompt_title: promptTitleByWeek.get(e.week) ?? `Week ${e.week}`,
-        entry_title: e.title,
-        content: e.content,
-        updated_at: e.updated_at,
-        created_at: e.created_at
+        entry_title: e.title ?? null,
+        content: e.content ?? "",
+
+        life_stage: e.life_stage ?? null,
+        tone: e.tone ?? null,
+        key_people: e.key_people ?? null,
+        locations: e.locations ?? null,
+        themes: e.themes ?? null,
+
+        updated_at: e.updated_at ?? null,
+        created_at: e.created_at ?? null
       }))
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
 
+    const safeEmail = (target.email ?? userId ?? "user").replaceAll("/", "_");
+    const date = new Date().toISOString().slice(0, 10);
+
     const a = document.createElement("a");
     a.href = url;
-    a.download = `autobiography_export_${target?.email ?? userId}.json`;
+    a.download = `autobiography_${safeEmail}_${date}.json`;
     a.click();
 
     URL.revokeObjectURL(url);
@@ -160,7 +181,8 @@ export default function UserClient() {
           <h1 className="text-2xl font-semibold">User</h1>
           {target ? (
             <div className="text-sm opacity-80">
-              {target.email ?? "(no email)"} · Started: {target.start_date ?? "-"} · Entries: {entries.length}
+              {target.email ?? "(no email)"} · Started: {target.start_date ?? "-"} · Entries:{" "}
+              {entries.length}
             </div>
           ) : null}
         </div>
@@ -191,7 +213,9 @@ export default function UserClient() {
               <div className="col-span-1">{e.week}</div>
               <div className="col-span-4">{promptTitleByWeek.get(e.week) ?? `Week ${e.week}`}</div>
               <div className="col-span-3">{e.title ?? "-"}</div>
-              <div className="col-span-2">{new Date(e.updated_at).toLocaleDateString()}</div>
+              <div className="col-span-2">
+                {e.updated_at ? new Date(e.updated_at).toLocaleDateString() : "-"}
+              </div>
               <div className="col-span-2">
                 <a className="underline" href={`/dashboard?week=${e.week}`} target="_blank" rel="noreferrer">
                   Open week
