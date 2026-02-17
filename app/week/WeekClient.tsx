@@ -269,7 +269,7 @@ export default function WeekClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompts, entries, selectedWeek]);
 
-  // (1) Open list includes Open + In Progress (anything NOT complete)
+  // Open list includes Open + In Progress (anything NOT complete)
   const openWeeks = useMemo(() => {
     const byWeek = new Map<number, EntryRow>();
     for (const e of entries) byWeek.set(e.week, e);
@@ -397,6 +397,7 @@ export default function WeekClient() {
     await saveInternal("manual");
   }
 
+  // Autosave every 30 seconds while writing if dirty and has some text
   useEffect(() => {
     if (view !== "write") return;
 
@@ -423,7 +424,9 @@ export default function WeekClient() {
 
   const pageClass = high ? "bg-black text-white min-h-screen" : "min-h-screen";
   const cardClass = high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4";
-  const inputClass = high ? "w-full rounded-lg border border-white bg-black text-white p-2" : "w-full rounded-lg border p-2";
+  const inputClass = high
+    ? "w-full rounded-lg border border-white bg-black text-white p-2"
+    : "w-full rounded-lg border p-2";
   const smallInputClass = high
     ? "w-full rounded-lg border border-white bg-black text-white p-2 text-sm"
     : "w-full rounded-lg border p-2 text-sm";
@@ -434,7 +437,7 @@ export default function WeekClient() {
 
   const contentClass = textSize === "large" ? "text-lg leading-relaxed" : "text-base";
 
-  // (2) Hide Continue button when already on current week
+  // Hide Continue button when already on current week
   const showContinue = selectedWeek !== currentWeek;
 
   return (
@@ -516,15 +519,221 @@ export default function WeekClient() {
           </div>
         )}
 
-        {/* The rest of the file is your existing write/past UI, unchanged */}
-        {view !== "open" ? (
+        {view === "past" && (
           <div className={cardClass}>
-            <div className="text-sm opacity-80">
-              Your write and past sections remain unchanged in this paste.
-              If you want, I can re-post the full remainder, but this is enough for the tweaks above.
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-xl font-semibold">Edit past submissions</div>
+                <div className={high ? "text-sm" : "text-sm opacity-80"}>
+                  You can revisit anything you have already written.
+                </div>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                <button className={buttonClass} onClick={() => setPastSort("week")}>
+                  Sort by week
+                </button>
+                <button className={buttonClass} onClick={() => setPastSort("title")}>
+                  Sort by question
+                </button>
+                <button className={buttonClass} onClick={() => setPastSort("updated")}>
+                  Sort by last edit
+                </button>
+              </div>
             </div>
+
+            {pastEntries.length === 0 ? (
+              <div className={high ? "text-sm" : "text-sm opacity-80"}>No submissions yet.</div>
+            ) : (
+              <div className="space-y-2 mt-3">
+                {pastEntries.map((x) => (
+                  <div
+                    key={x.id}
+                    className={
+                      high
+                        ? "border border-white rounded-lg p-3 flex items-center justify-between gap-3"
+                        : "border rounded-lg p-3 flex items-center justify-between gap-3"
+                    }
+                  >
+                    <div>
+                      <div className="font-semibold">Week {x.week}</div>
+                      <div className={high ? "text-sm" : "text-sm opacity-80"}>{x.promptTitle}</div>
+                      {x.entryTitle ? (
+                        <div className={high ? "text-sm" : "text-sm"}>Entry title: {x.entryTitle}</div>
+                      ) : null}
+                    </div>
+                    <button className={buttonClass} onClick={() => goToWeek(x.week)}>
+                      Edit
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        ) : null}
+        )}
+
+        {view === "write" && (
+          <>
+            {prompt ? (
+              <div className={cardClass}>
+                <div className={high ? "text-sm" : "text-sm opacity-80"}>{prompt.category}</div>
+                <div className="text-xl font-semibold">{prompt.title}</div>
+                <div className={high ? "text-sm" : "text-sm"}>{prompt.coaching}</div>
+
+                <div className="space-y-2 mt-3">
+                  <div className="font-semibold">Main questions</div>
+                  <ul className="list-disc pl-6 space-y-1">
+                    {prompt.questions.map((q, i) => (
+                      <li key={i}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="space-y-2 mt-3">
+                  <div className="font-semibold">Helpful follow ups</div>
+                  <ul className="list-disc pl-6 space-y-1">
+                    {prompt.helpful_followups.map((q, i) => (
+                      <li key={i}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ) : (
+              <div className={cardClass}>No prompt found for Week {selectedWeek}.</div>
+            )}
+
+            <div className={cardClass}>
+              <div className="font-semibold">Your entry</div>
+
+              <div className="mt-3 space-y-3">
+                <input
+                  className={inputClass}
+                  placeholder="Optional title"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+
+                <textarea
+                  className={inputClass + " min-h-[260px]"}
+                  placeholder="Write here..."
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                />
+
+                <details className="pt-2">
+                  <summary
+                    className={
+                      high
+                        ? "cursor-pointer select-none text-sm font-semibold"
+                        : "cursor-pointer select-none text-sm font-semibold opacity-80"
+                    }
+                  >
+                    Add info (optional)
+                  </summary>
+
+                  <div className="mt-3 space-y-3">
+                    <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                      These details help organize your story later. You can skip them.
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className={high ? "text-xs" : "text-xs opacity-80"}>Life stage</label>
+                        <select className={smallInputClass} value={lifeStage} onChange={(e) => setLifeStage(e.target.value)}>
+                          <option value="">Select</option>
+                          <option value="Early childhood">Early childhood</option>
+                          <option value="School years">School years</option>
+                          <option value="Young adult">Young adult</option>
+                          <option value="Early career">Early career</option>
+                          <option value="Midlife">Midlife</option>
+                          <option value="Later life">Later life</option>
+                          <option value="Reflection">Reflection</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={high ? "text-xs" : "text-xs opacity-80"}>Emotional tone</label>
+                        <select className={smallInputClass} value={tone} onChange={(e) => setTone(e.target.value)}>
+                          <option value="">Select</option>
+                          <option value="Joyful">Joyful</option>
+                          <option value="Grateful">Grateful</option>
+                          <option value="Proud">Proud</option>
+                          <option value="Hopeful">Hopeful</option>
+                          <option value="Neutral">Neutral</option>
+                          <option value="Bittersweet">Bittersweet</option>
+                          <option value="Sad">Sad</option>
+                          <option value="Angry">Angry</option>
+                          <option value="Anxious">Anxious</option>
+                          <option value="Regretful">Regretful</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Key people (comma-separated)</label>
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
+                        value={keyPeople}
+                        onChange={(e) => setKeyPeople(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Locations (comma-separated)</label>
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
+                        value={locations}
+                        onChange={(e) => setLocations(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={high ? "text-xs" : "text-xs opacity-80"}>Themes (comma-separated)</label>
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: resilience, family, faith, work ethic"
+                        value={themes}
+                        onChange={(e) => setThemes(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </details>
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button className={primaryButtonClass} onClick={save}>
+                    Save
+                  </button>
+
+                  <button
+                    className={buttonClass}
+                    onClick={async () => {
+                      const next: EntryStatusMode = entryStatus === "complete" ? "in_progress" : "complete";
+                      await saveInternal("manual", next);
+                    }}
+                    title={entryStatus === "complete" ? "Mark as in progress" : "Mark as complete"}
+                  >
+                    {entryStatus === "complete" ? "Complete" : "Mark complete"}
+                  </button>
+
+                  {isDirty ? <span className={high ? "text-sm" : "text-sm opacity-80"}>Not saved</span> : null}
+                </div>
+
+                <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                  Status: {entryStatus === "complete" ? "Complete" : "In Progress"}
+                </div>
+
+                {lastSavedAt ? (
+                  <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                    Last saved: {formatSavedTimestamp(lastSavedAt)}
+                  </div>
+                ) : (
+                  <div className={high ? "text-xs" : "text-xs opacity-70"}>Last saved: not yet</div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
