@@ -1,12 +1,19 @@
+import { redirect } from "next/navigation";
 import { Suspense } from "react";
-import DashboardClient from "./DashboardClient";
+import DashboardOverviewClient from "./DashboardOverviewClient";
 
-export const dynamic = "force-dynamic";
+export default function DashboardPage({
+  searchParams
+}: {
+  searchParams: { week?: string };
+}) {
+  if (searchParams?.week) {
+    redirect(`/week?week=${encodeURIComponent(searchParams.week)}`);
+  }
 
-export default function DashboardPage() {
   return (
-    <Suspense fallback={<div className="p-6">Loading...</div>}>
-      <DashboardClient />
+    <Suspense fallback={<div className="p-6">Loading dashboard...</div>}>
+      <DashboardOverviewClient />
     </Suspense>
   );
 }

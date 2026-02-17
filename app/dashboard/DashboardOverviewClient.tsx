@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/src/lib/supabaseClient";
+import { supabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
 
 type PromptRow = {
@@ -111,9 +111,7 @@ export default function DashboardOverviewClient() {
 
       const prof = profile as ProfileRow;
       setStartDate(prof?.start_date ?? null);
-
-      if (prof?.start_date) setCurrentWeek(weekFromStartDate(prof.start_date));
-      else setCurrentWeek(1);
+      setCurrentWeek(prof?.start_date ? weekFromStartDate(prof.start_date) : 1);
 
       const { data: promptRows, error: promptErr } = await supabase
         .from("prompts")
@@ -185,7 +183,7 @@ export default function DashboardOverviewClient() {
       const ra = statusRank(a.displayStatus);
       const rb = statusRank(b.displayStatus);
       if (ra !== rb) return ra - rb;
-      return b.week - a.week; // newest first within bucket
+      return b.week - a.week;
     });
 
     return computed;
@@ -254,7 +252,7 @@ export default function DashboardOverviewClient() {
           </div>
         </div>
 
-        {/* (3) Progress bar with visible green fill */}
+        {/* Progress bar (should be visible) */}
         <div className={cardClass}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="font-semibold">Progress: {completedCount} of 52 complete</div>
@@ -268,10 +266,11 @@ export default function DashboardOverviewClient() {
             />
           </div>
 
-          <div className="text-xs opacity-70 mt-2">Complete means you explicitly marked that week done.</div>
+          <div className="text-xs opacity-70 mt-2">
+            Complete means you explicitly marked that week done.
+          </div>
         </div>
 
-        {/* (4) Current week label moved below progress bar */}
         <div className="text-sm opacity-80">Current week: {currentWeek}</div>
 
         {message && <div className={cardClass}>{message}</div>}
@@ -302,19 +301,15 @@ export default function DashboardOverviewClient() {
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.week}
                       </td>
-
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.title}
                       </td>
-
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.scheduledText}
                       </td>
-
                       <td className={`py-3 pr-3 cursor-pointer ${statusClass(r.displayStatus)}`} onClick={() => goToWeek(r.week)}>
                         {r.displayStatus}
                       </td>
-
                       <td className="py-3">
                         {r.displayStatus === "Open" ? (
                           <button className={buttonClass} onClick={() => goToWeek(r.week)}>

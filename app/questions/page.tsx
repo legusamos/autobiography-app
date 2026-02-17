@@ -1,5 +1,5 @@
-import QuestionsClient from "./QuestionsClient";
+import { redirect } from "next/navigation";
 
-export default function QuestionsPage() {
-  return <QuestionsClient />;
+export default function QuestionsAlias() {
+  redirect("/dashboard");
 }
