@@ -24,7 +24,6 @@ type ProfileRow = {
 };
 
 function clampWeek(n: number) {
-  if (!Number.isFinite(n)) return 1;
   return Math.max(1, Math.min(52, n));
 }
 
@@ -58,7 +57,6 @@ export default function QuestionsClient() {
 
   const [prompts, setPrompts] = useState<PromptRow[]>([]);
   const [entries, setEntries] = useState<EntryRow[]>([]);
-
   const [startDate, setStartDate] = useState<string | null>(null);
   const [currentWeek, setCurrentWeek] = useState<number>(1);
 
@@ -90,11 +88,11 @@ export default function QuestionsClient() {
 
       const prof = profile as ProfileRow;
 
-      setStartDate(prof.start_date ?? null);
-      setTextSize(prof.ui_text_size === "large" ? "large" : "normal");
-      setContrast(prof.ui_contrast === "high" ? "high" : "default");
+      setStartDate(prof?.start_date ?? null);
+      setTextSize(prof?.ui_text_size === "large" ? "large" : "normal");
+      setContrast(prof?.ui_contrast === "high" ? "high" : "default");
 
-      const cw = prof.start_date ? weekFromStartDate(prof.start_date) : 1;
+      const cw = prof?.start_date ? weekFromStartDate(prof.start_date) : 1;
       setCurrentWeek(cw);
 
       const { data: promptRows, error: promptErr } = await supabase
@@ -122,7 +120,6 @@ export default function QuestionsClient() {
 
       setPrompts((promptRows ?? []) as PromptRow[]);
       setEntries((entryRows ?? []) as EntryRow[]);
-
       setLoading(false);
     }
 
@@ -134,6 +131,16 @@ export default function QuestionsClient() {
     for (const e of entries) m.set(e.week, e);
     return m;
   }, [entries]);
+
+  const allCompleted = useMemo(() => {
+    return (
+      prompts.length === 52 &&
+      prompts.every((p) => {
+        const e = entryByWeek.get(p.week);
+        return !!e && (e.content ?? "").trim().length > 0;
+      })
+    );
+  }, [prompts, entryByWeek]);
 
   const rows = useMemo(() => {
     const base = startDate ? new Date(startDate + "T00:00:00Z") : null;
@@ -147,16 +154,11 @@ export default function QuestionsClient() {
       return {
         week: p.week,
         title: p.title,
-        scheduledText: scheduled ? formatDateShort(scheduled) : "Set start date",
+        scheduledText: scheduled ? formatDateShort(scheduled) : "-",
         answered
       };
     });
   }, [prompts, entryByWeek, startDate]);
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    router.push("/login");
-  }
 
   function goToWeek(week: number) {
     router.push(`/dashboard?week=${week}`);
@@ -166,19 +168,30 @@ export default function QuestionsClient() {
     router.push(`/dashboard?week=${currentWeek}`);
   }
 
+  async function signOut() {
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
+
   if (loading) return <div className="p-6">Loading questions...</div>;
 
   const high = contrast === "high";
+
   const pageClass = high ? "bg-black text-white min-h-screen" : "min-h-screen";
+  const contentClass = textSize === "large" ? "text-lg leading-relaxed" : "text-base";
+
   const cardClass = high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4";
   const buttonClass = high ? "rounded-lg border border-white px-3 py-2" : "rounded-lg border px-3 py-2";
-  const contentClass = textSize === "large" ? "text-lg leading-relaxed" : "text-base";
+
+  // Table styling: keep high contrast readable (no white-on-white highlights)
+  const theadBorderClass = high ? "border-b border-white" : "border-b";
+  const rowBorderClass = high ? "border-b border-white" : "border-b";
 
   return (
     <div className={`${pageClass} ${contentClass}`}>
       <div className="max-w-4xl mx-auto p-6 space-y-4">
         <div className="flex items-start justify-between gap-3 flex-wrap">
-          <div>
+          <div className="space-y-1">
             <h1 className="text-2xl font-semibold">All Questions</h1>
             <div className={high ? "text-sm" : "text-sm opacity-80"}>
               Work ahead or pick any question that feels right today. Weekly emails stay on schedule.
@@ -186,12 +199,16 @@ export default function QuestionsClient() {
             <div className={high ? "text-sm" : "text-sm opacity-80"}>Current week: {currentWeek}</div>
           </div>
 
+          {/* Navigation buttons (so user isn't stuck) */}
           <div className="flex gap-2 flex-wrap">
             <button className={buttonClass} onClick={goToCurrentWeek}>
               Go to current week
             </button>
             <button className={buttonClass} onClick={() => router.push("/dashboard")}>
               Back to dashboard
+            </button>
+            <button className={buttonClass} onClick={() => router.push("/profile")}>
+              Profile
             </button>
             <button className={buttonClass} onClick={signOut}>
               Sign out
@@ -201,29 +218,47 @@ export default function QuestionsClient() {
 
         {message && <div className={cardClass}>{message}</div>}
 
+        {allCompleted ? (
+          <div className={high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4 bg-green-50"}>
+            <div className="font-semibold">Congratulations.</div>
+            <div className={high ? "text-sm" : "text-sm opacity-80"}>You have completed all 52 questions.</div>
+          </div>
+        ) : null}
+
         <div className={cardClass}>
           <div className="overflow-x-auto">
             <table className="w-full text-left">
               <thead>
-                <tr className={high ? "border-b border-white" : "border-b"}>
+                <tr className={theadBorderClass}>
                   <th className="py-2 pr-3">Week</th>
                   <th className="py-2 pr-3">Question</th>
                   <th className="py-2 pr-3">Email date</th>
                   <th className="py-2">Status</th>
                 </tr>
               </thead>
+
               <tbody>
                 {rows.map((r) => {
                   const isCurrent = r.week === currentWeek;
+                  const isFuture = r.week > currentWeek;
+
+                  // Row visuals:
+                  // - Current: outline/border emphasis (no background fill in high-contrast)
+                  // - Future: muted opacity
+                  // - Hover: subtle (different per mode)
+                  const currentRowClass = high
+                    ? "outline outline-2 outline-white outline-offset-[-2px] font-semibold"
+                    : "bg-slate-100 font-semibold";
+
+                  const futureClass = isFuture ? "opacity-60" : "";
+                  const hoverClass = high ? "hover:opacity-90" : "hover:bg-slate-50";
 
                   return (
                     <tr
                       key={r.week}
-                      className={
-                        high
-                          ? `border-b border-white cursor-pointer hover:opacity-90 ${isCurrent ? "font-semibold" : ""}`
-                          : `border-b cursor-pointer hover:bg-slate-50 ${isCurrent ? "font-semibold" : ""}`
-                      }
+                      className={`${rowBorderClass} cursor-pointer ${hoverClass} ${futureClass} ${
+                        isCurrent ? currentRowClass : ""
+                      }`}
                       onClick={() => goToWeek(r.week)}
                       role="button"
                       tabIndex={0}
@@ -234,7 +269,13 @@ export default function QuestionsClient() {
                       <td className="py-3 pr-3">{r.week}</td>
                       <td className="py-3 pr-3">{r.title}</td>
                       <td className="py-3 pr-3">{r.scheduledText}</td>
-                      <td className="py-3">{r.answered ? "Answered" : "Open"}</td>
+                      <td className="py-3">
+                        {r.answered ? (
+                          <span className={high ? "font-semibold" : "text-green-600 font-medium"}>Answered</span>
+                        ) : (
+                          <span className={high ? "opacity-80" : "text-gray-500"}>Open</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
