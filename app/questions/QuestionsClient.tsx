@@ -14,6 +14,7 @@ type EntryRow = {
   id: string;
   week: number;
   content: string;
+  status: string | null; // "draft"(legacy), "in_progress", "complete"
   updated_at?: string;
 };
 
@@ -22,6 +23,9 @@ type ProfileRow = {
   ui_text_size: "normal" | "large" | null;
   ui_contrast: "default" | "high" | null;
 };
+
+type EntryStatusMode = "in_progress" | "complete";
+type DisplayStatus = "Open" | "In Progress" | "Complete";
 
 function clampWeek(n: number) {
   return Math.max(1, Math.min(52, n));
@@ -43,10 +47,27 @@ function addDays(date: Date, days: number) {
 
 function formatDateShort(d: Date) {
   try {
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "2-digit", day: "2-digit" });
+    return d.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
   } catch {
     return d.toISOString().slice(0, 10);
   }
+}
+
+function normalizeEntryStatus(raw: string | null | undefined): EntryStatusMode {
+  // Backward compatible: treat anything non-"complete" as "in_progress"
+  if (raw === "complete") return "complete";
+  return "in_progress";
+}
+
+function deriveDisplayStatus(entry: EntryRow | undefined): DisplayStatus {
+  if (!entry) return "Open";
+  const hasText = (entry.content ?? "").trim().length > 0;
+  if (!hasText) return "Open";
+  return normalizeEntryStatus(entry.status) === "complete" ? "Complete" : "In Progress";
 }
 
 export default function QuestionsClient() {
@@ -62,6 +83,8 @@ export default function QuestionsClient() {
 
   const [textSize, setTextSize] = useState<"normal" | "large">("normal");
   const [contrast, setContrast] = useState<"default" | "high">("default");
+
+  const [busyWeek, setBusyWeek] = useState<number | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -92,8 +115,8 @@ export default function QuestionsClient() {
       setTextSize(prof?.ui_text_size === "large" ? "large" : "normal");
       setContrast(prof?.ui_contrast === "high" ? "high" : "default");
 
-      const cw = prof?.start_date ? weekFromStartDate(prof.start_date) : 1;
-      setCurrentWeek(cw);
+      if (prof?.start_date) setCurrentWeek(weekFromStartDate(prof.start_date));
+      else setCurrentWeek(1);
 
       const { data: promptRows, error: promptErr } = await supabase
         .from("prompts")
@@ -109,7 +132,7 @@ export default function QuestionsClient() {
 
       const { data: entryRows, error: entryErr } = await supabase
         .from("entries")
-        .select("id, week, content, updated_at")
+        .select("id, week, content, status, updated_at")
         .eq("user_id", auth.user.id);
 
       if (entryErr) {
@@ -132,14 +155,16 @@ export default function QuestionsClient() {
     return m;
   }, [entries]);
 
+  // Completion = all 52 weeks are explicitly COMPLETE and have non-empty content
   const allCompleted = useMemo(() => {
-    return (
-      prompts.length === 52 &&
-      prompts.every((p) => {
-        const e = entryByWeek.get(p.week);
-        return !!e && (e.content ?? "").trim().length > 0;
-      })
-    );
+    if (prompts.length !== 52) return false;
+    return prompts.every((p) => {
+      const e = entryByWeek.get(p.week);
+      if (!e) return false;
+      const hasText = (e.content ?? "").trim().length > 0;
+      if (!hasText) return false;
+      return normalizeEntryStatus(e.status) === "complete";
+    });
   }, [prompts, entryByWeek]);
 
   const rows = useMemo(() => {
@@ -147,7 +172,7 @@ export default function QuestionsClient() {
 
     return prompts.map((p) => {
       const e = entryByWeek.get(p.week);
-      const answered = !!e && (e.content ?? "").trim().length > 0;
+      const displayStatus = deriveDisplayStatus(e);
 
       const scheduled = base ? addDays(base, (p.week - 1) * 7) : null;
 
@@ -155,7 +180,8 @@ export default function QuestionsClient() {
         week: p.week,
         title: p.title,
         scheduledText: scheduled ? formatDateShort(scheduled) : "-",
-        answered
+        displayStatus,
+        canToggle: displayStatus !== "Open"
       };
     });
   }, [prompts, entryByWeek, startDate]);
@@ -173,19 +199,54 @@ export default function QuestionsClient() {
     router.push("/login");
   }
 
+  async function toggleComplete(week: number) {
+    const e = entryByWeek.get(week);
+    if (!e) return;
+
+    const hasText = (e.content ?? "").trim().length > 0;
+    if (!hasText) return;
+
+    const current = normalizeEntryStatus(e.status);
+    const next: EntryStatusMode = current === "complete" ? "in_progress" : "complete";
+
+    setBusyWeek(week);
+    setMessage(null);
+
+    const { error } = await supabase.from("entries").update({ status: next }).eq("id", e.id);
+
+    if (error) {
+      setMessage(`Status update error: ${error.message}`);
+      setBusyWeek(null);
+      return;
+    }
+
+    setEntries((prev) => prev.map((row) => (row.id === e.id ? { ...row, status: next } : row)));
+    setBusyWeek(null);
+  }
+
   if (loading) return <div className="p-6">Loading questions...</div>;
 
   const high = contrast === "high";
-
   const pageClass = high ? "bg-black text-white min-h-screen" : "min-h-screen";
   const contentClass = textSize === "large" ? "text-lg leading-relaxed" : "text-base";
 
   const cardClass = high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4";
   const buttonClass = high ? "rounded-lg border border-white px-3 py-2" : "rounded-lg border px-3 py-2";
 
-  // Table styling: keep high contrast readable (no white-on-white highlights)
   const theadBorderClass = high ? "border-b border-white" : "border-b";
   const rowBorderClass = high ? "border-b border-white" : "border-b";
+
+  function statusClass(status: DisplayStatus) {
+    if (high) {
+      // High contrast: readable, no colored backgrounds
+      if (status === "Complete") return "font-semibold";
+      if (status === "In Progress") return "opacity-90";
+      return "opacity-70";
+    }
+    if (status === "Complete") return "text-green-700 font-semibold";
+    if (status === "In Progress") return "text-blue-700 font-medium";
+    return "text-gray-600";
+  }
 
   return (
     <div className={`${pageClass} ${contentClass}`}>
@@ -199,7 +260,6 @@ export default function QuestionsClient() {
             <div className={high ? "text-sm" : "text-sm opacity-80"}>Current week: {currentWeek}</div>
           </div>
 
-          {/* Navigation buttons (so user isn't stuck) */}
           <div className="flex gap-2 flex-wrap">
             <button className={buttonClass} onClick={goToCurrentWeek}>
               Go to current week
@@ -219,7 +279,7 @@ export default function QuestionsClient() {
         {message && <div className={cardClass}>{message}</div>}
 
         {allCompleted ? (
-          <div className={high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4 bg-green-50"}>
+          <div className={cardClass}>
             <div className="font-semibold">Congratulations.</div>
             <div className={high ? "text-sm" : "text-sm opacity-80"}>You have completed all 52 questions.</div>
           </div>
@@ -233,7 +293,8 @@ export default function QuestionsClient() {
                   <th className="py-2 pr-3">Week</th>
                   <th className="py-2 pr-3">Question</th>
                   <th className="py-2 pr-3">Email date</th>
-                  <th className="py-2">Status</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2">Complete</th>
                 </tr>
               </thead>
 
@@ -242,10 +303,6 @@ export default function QuestionsClient() {
                   const isCurrent = r.week === currentWeek;
                   const isFuture = r.week > currentWeek;
 
-                  // Row visuals:
-                  // - Current: outline/border emphasis (no background fill in high-contrast)
-                  // - Future: muted opacity
-                  // - Hover: subtle (different per mode)
                   const currentRowClass = high
                     ? "outline outline-2 outline-white outline-offset-[-2px] font-semibold"
                     : "bg-slate-100 font-semibold";
@@ -253,27 +310,65 @@ export default function QuestionsClient() {
                   const futureClass = isFuture ? "opacity-60" : "";
                   const hoverClass = high ? "hover:opacity-90" : "hover:bg-slate-50";
 
+                  const disabled = !r.canToggle || busyWeek === r.week;
+
+                  const toggleLabel = r.displayStatus === "Complete" ? "Unmark" : "Mark";
+
                   return (
                     <tr
                       key={r.week}
-                      className={`${rowBorderClass} cursor-pointer ${hoverClass} ${futureClass} ${
-                        isCurrent ? currentRowClass : ""
-                      }`}
-                      onClick={() => goToWeek(r.week)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") goToWeek(r.week);
-                      }}
+                      className={`${rowBorderClass} ${hoverClass} ${futureClass} ${isCurrent ? currentRowClass : ""}`}
                     >
-                      <td className="py-3 pr-3">{r.week}</td>
-                      <td className="py-3 pr-3">{r.title}</td>
-                      <td className="py-3 pr-3">{r.scheduledText}</td>
+                      <td
+                        className="py-3 pr-3 cursor-pointer"
+                        onClick={() => goToWeek(r.week)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        {r.week}
+                      </td>
+
+                      <td
+                        className="py-3 pr-3 cursor-pointer"
+                        onClick={() => goToWeek(r.week)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        {r.title}
+                      </td>
+
+                      <td
+                        className="py-3 pr-3 cursor-pointer"
+                        onClick={() => goToWeek(r.week)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        {r.scheduledText}
+                      </td>
+
+                      <td
+                        className={`py-3 pr-3 cursor-pointer ${statusClass(r.displayStatus)}`}
+                        onClick={() => goToWeek(r.week)}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        {r.displayStatus}
+                      </td>
+
                       <td className="py-3">
-                        {r.answered ? (
-                          <span className={high ? "font-semibold" : "text-green-600 font-medium"}>Answered</span>
+                        {r.displayStatus === "Open" ? (
+                          <button className={buttonClass} onClick={() => goToWeek(r.week)}>
+                            Start
+                          </button>
                         ) : (
-                          <span className={high ? "opacity-80" : "text-gray-500"}>Open</span>
+                          <button
+                            className={buttonClass}
+                            disabled={disabled}
+                            onClick={() => toggleComplete(r.week)}
+                            title={r.displayStatus === "Complete" ? "Mark as in progress" : "Mark as complete"}
+                          >
+                            {disabled ? "Saving..." : toggleLabel}
+                          </button>
                         )}
                       </td>
                     </tr>
