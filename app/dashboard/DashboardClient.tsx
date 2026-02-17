@@ -21,7 +21,7 @@ type EntryRow = {
   week: number;
   title: string | null;
   content: string;
-  status: string;
+  status: string | null;
   life_stage: string | null;
   tone: string | null;
   key_people: string | null;
@@ -39,6 +39,9 @@ type ProfilePrefsRow = {
 
 type TextSizeMode = "normal" | "large";
 type ContrastMode = "default" | "high";
+type ViewMode = "write" | "open" | "past";
+type PastSortMode = "week" | "title" | "updated";
+type EntryStatusMode = "in_progress" | "complete";
 
 function clampWeek(n: number) {
   if (!Number.isFinite(n)) return 1;
@@ -67,6 +70,13 @@ function formatSavedTimestamp(d: Date) {
   }
 }
 
+function normalizeEntryStatus(raw: string | null | undefined): EntryStatusMode {
+  // Backward compatible: "draft" becomes "in_progress"
+  if (!raw) return "in_progress";
+  if (raw === "complete") return "complete";
+  return "in_progress";
+}
+
 export default function DashboardClient() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -78,7 +88,6 @@ export default function DashboardClient() {
   }, [sp]);
 
   const [loading, setLoading] = useState(true);
-
   const [currentWeek, setCurrentWeek] = useState<number>(1);
   const [selectedWeek, setSelectedWeek] = useState<number>(1);
 
@@ -97,17 +106,18 @@ export default function DashboardClient() {
   const [locations, setLocations] = useState("");
   const [themes, setThemes] = useState("");
 
+  const [entryStatus, setEntryStatus] = useState<EntryStatusMode>("in_progress");
+
   const [message, setMessage] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
 
-  const [view, setView] = useState<"write" | "open" | "past">("write");
-  const [pastSort, setPastSort] = useState<"week" | "title" | "updated">("week");
+  const [view, setView] = useState<ViewMode>("write");
+  const [pastSort, setPastSort] = useState<PastSortMode>("week");
 
-  // Preferences come from profile now
   const [textSize, setTextSize] = useState<TextSizeMode>("normal");
   const [contrast, setContrast] = useState<ContrastMode>("default");
 
-  // Tracks "dirty" state to warn before leaving
+  // Unsaved changes protection
   const savedSnapshotRef = useRef<string>("");
   const isSavingRef = useRef(false);
 
@@ -120,7 +130,8 @@ export default function DashboardClient() {
       tone,
       keyPeople,
       locations,
-      themes
+      themes,
+      entryStatus
     });
   }
 
@@ -165,10 +176,12 @@ export default function DashboardClient() {
     if (!confirmDiscardIfDirty()) return;
     router.push("/profile");
   }
+
   function goToQuestions() {
     if (!confirmDiscardIfDirty()) return;
     router.push("/questions");
   }
+
   useEffect(() => {
     async function loadAll() {
       setLoading(true);
@@ -227,7 +240,7 @@ export default function DashboardClient() {
       setLoading(false);
     }
 
-    loadAll();
+    void loadAll();
   }, [router, weekParam]);
 
   useEffect(() => {
@@ -246,7 +259,10 @@ export default function DashboardClient() {
     setLocations(e?.locations ?? "");
     setThemes(e?.themes ?? "");
 
-    const snap = JSON.stringify({
+    const normalized = normalizeEntryStatus(e?.status);
+    setEntryStatus(normalized);
+
+    savedSnapshotRef.current = JSON.stringify({
       selectedWeek,
       title: e?.title ?? "",
       content: e?.content ?? "",
@@ -254,9 +270,9 @@ export default function DashboardClient() {
       tone: e?.tone ?? "",
       keyPeople: e?.key_people ?? "",
       locations: e?.locations ?? "",
-      themes: e?.themes ?? ""
+      themes: e?.themes ?? "",
+      entryStatus: normalized
     });
-    savedSnapshotRef.current = snap;
 
     if (e?.updated_at) setLastSavedAt(new Date(e.updated_at));
     else setLastSavedAt(null);
@@ -296,8 +312,7 @@ export default function DashboardClient() {
     const sorted = [...filled];
     if (pastSort === "week") sorted.sort((a, b) => a.week - b.week);
     if (pastSort === "title") sorted.sort((a, b) => a.promptTitle.localeCompare(b.promptTitle));
-    if (pastSort === "updated")
-      sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+    if (pastSort === "updated") sorted.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
     return sorted;
   }, [entries, prompts, pastSort]);
 
@@ -309,13 +324,13 @@ export default function DashboardClient() {
     router.push(`/dashboard?week=${ww}`);
   }
 
-  function switchView(next: "write" | "open" | "past") {
+  function switchView(next: ViewMode) {
     if (view === next) return;
     if (!confirmDiscardIfDirty()) return;
     setView(next);
   }
 
-  async function saveInternal(mode: "manual" | "auto") {
+  async function saveInternal(mode: "manual" | "auto", overrideStatus?: EntryStatusMode) {
     if (isSavingRef.current) return;
     if (!prompt) return;
 
@@ -327,13 +342,15 @@ export default function DashboardClient() {
         return;
       }
 
+      const statusToSave: EntryStatusMode = overrideStatus ?? entryStatus;
+
       const payload = {
         user_id: auth.user.id,
         prompt_key: prompt.prompt_key,
         week: prompt.week,
         title: title || null,
         content: content || "",
-        status: "draft",
+        status: statusToSave,
         life_stage: lifeStage || null,
         tone: tone || null,
         key_people: keyPeople || null,
@@ -358,12 +375,24 @@ export default function DashboardClient() {
       const now = new Date();
       setLastSavedAt(now);
 
+      if (overrideStatus) setEntryStatus(overrideStatus);
+
       if (mode === "manual") setMessage(`Saved at ${formatSavedTimestamp(now)}.`);
       else setMessage(null);
 
       await loadEntriesForUser(auth.user.id);
 
-      savedSnapshotRef.current = snapshot;
+      savedSnapshotRef.current = JSON.stringify({
+        selectedWeek,
+        title,
+        content,
+        lifeStage,
+        tone,
+        keyPeople,
+        locations,
+        themes,
+        entryStatus: overrideStatus ?? entryStatus
+      });
     } finally {
       isSavingRef.current = false;
     }
@@ -400,9 +429,7 @@ export default function DashboardClient() {
 
   const pageClass = high ? "bg-black text-white min-h-screen" : "min-h-screen";
   const cardClass = high ? "border border-white rounded-xl p-4" : "border rounded-xl p-4";
-  const inputClass = high
-    ? "w-full rounded-lg border border-white bg-black text-white p-2"
-    : "w-full rounded-lg border p-2";
+  const inputClass = high ? "w-full rounded-lg border border-white bg-black text-white p-2" : "w-full rounded-lg border p-2";
   const smallInputClass = high
     ? "w-full rounded-lg border border-white bg-black text-white p-2 text-sm"
     : "w-full rounded-lg border p-2 text-sm";
@@ -430,21 +457,18 @@ export default function DashboardClient() {
               <button className={buttonClass} onClick={() => goToWeek(currentWeek)}>
                 Continue (Current week)
               </button>
-                            <button className={buttonClass} onClick={goToQuestions}>
-                All Questions
-              </button>
               <button className={buttonClass} onClick={() => switchView("open")}>
                 Open questions ({openWeeks.length})
               </button>
               <button className={buttonClass} onClick={() => switchView("past")}>
                 Edit past submissions ({pastEntries.length})
               </button>
-
-              {/* FIX: Profile now prompts before navigating */}
+              <button className={buttonClass} onClick={goToQuestions}>
+                All Questions
+              </button>
               <button className={buttonClass} onClick={goToProfile}>
                 Profile
               </button>
-
               <button className={buttonClass} onClick={signOut}>
                 Sign out
               </button>
@@ -617,7 +641,13 @@ export default function DashboardClient() {
                 />
 
                 <details className="pt-2">
-                  <summary className={high ? "cursor-pointer select-none text-sm font-semibold" : "cursor-pointer select-none text-sm font-semibold opacity-80"}>
+                  <summary
+                    className={
+                      high
+                        ? "cursor-pointer select-none text-sm font-semibold"
+                        : "cursor-pointer select-none text-sm font-semibold opacity-80"
+                    }
+                  >
                     Add info (optional)
                   </summary>
 
@@ -661,17 +691,32 @@ export default function DashboardClient() {
 
                     <div className="space-y-1">
                       <label className={high ? "text-xs" : "text-xs opacity-80"}>Key people (comma-separated)</label>
-                      <input className={smallInputClass} placeholder="Example: Mom, Grandpa Ed, Coach Thompson" value={keyPeople} onChange={(e) => setKeyPeople(e.target.value)} />
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: Mom, Grandpa Ed, Coach Thompson"
+                        value={keyPeople}
+                        onChange={(e) => setKeyPeople(e.target.value)}
+                      />
                     </div>
 
                     <div className="space-y-1">
                       <label className={high ? "text-xs" : "text-xs opacity-80"}>Locations (comma-separated)</label>
-                      <input className={smallInputClass} placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning" value={locations} onChange={(e) => setLocations(e.target.value)} />
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: Dayton, Ohio; Myrtle Beach; Fort Benning"
+                        value={locations}
+                        onChange={(e) => setLocations(e.target.value)}
+                      />
                     </div>
 
                     <div className="space-y-1">
                       <label className={high ? "text-xs" : "text-xs opacity-80"}>Themes (comma-separated)</label>
-                      <input className={smallInputClass} placeholder="Example: resilience, family, faith, work ethic" value={themes} onChange={(e) => setThemes(e.target.value)} />
+                      <input
+                        className={smallInputClass}
+                        placeholder="Example: resilience, family, faith, work ethic"
+                        value={themes}
+                        onChange={(e) => setThemes(e.target.value)}
+                      />
                     </div>
                   </div>
                 </details>
@@ -685,17 +730,28 @@ export default function DashboardClient() {
                     Save
                   </button>
 
-                  {entry ? (
-                    <span className={high ? "text-sm" : "text-sm opacity-80"}>Editing saved entry</span>
-                  ) : (
-                    <span className={high ? "text-sm" : "text-sm opacity-80"}>New entry</span>
-                  )}
+                  <button
+                    className={buttonClass}
+                    onClick={async () => {
+                      const next: EntryStatusMode = entryStatus === "complete" ? "in_progress" : "complete";
+                      await saveInternal("manual", next);
+                    }}
+                    title={entryStatus === "complete" ? "Mark as in progress" : "Mark as complete"}
+                  >
+                    {entryStatus === "complete" ? "Complete" : "Mark complete"}
+                  </button>
 
                   {isDirty ? <span className={high ? "text-sm" : "text-sm opacity-80"}>Not saved</span> : null}
                 </div>
 
+                <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                  Status: {entryStatus === "complete" ? "Complete" : "In Progress"}
+                </div>
+
                 {lastSavedAt ? (
-                  <div className={high ? "text-xs" : "text-xs opacity-70"}>Last saved: {formatSavedTimestamp(lastSavedAt)}</div>
+                  <div className={high ? "text-xs" : "text-xs opacity-70"}>
+                    Last saved: {formatSavedTimestamp(lastSavedAt)}
+                  </div>
                 ) : (
                   <div className={high ? "text-xs" : "text-xs opacity-70"}>Last saved: not yet</div>
                 )}
