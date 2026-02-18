@@ -67,12 +67,6 @@ function deriveDisplayStatus(entry: EntryRow | undefined): DisplayStatus {
   return normalizeEntryStatus(entry.status) === "complete" ? "Complete" : "In Progress";
 }
 
-function statusRank(s: DisplayStatus) {
-  if (s === "Open") return 0;
-  if (s === "In Progress") return 1;
-  return 2;
-}
-
 export default function DashboardOverviewClient() {
   const router = useRouter();
 
@@ -152,32 +146,34 @@ export default function DashboardOverviewClient() {
     return m;
   }, [entries]);
 
-  // Lifecycle counts
+  // Lifecycle counts:
+  // - Open: no entry OR blank content
+  // - In Progress: has content, not complete
+  // - Complete: has content, complete
   const lifecycle = useMemo(() => {
-    let answered = 0;
-    let complete = 0;
+    let openCount = 0;
+    let inProgressCount = 0;
+    let completeCount = 0;
 
-    for (const e of entryByWeek.values()) {
-      const hasText = (e.content ?? "").trim().length > 0;
-      if (!hasText) continue;
-      answered += 1;
-      if (normalizeEntryStatus(e.status) === "complete") complete += 1;
+    for (let w = 1; w <= 52; w++) {
+      const e = entryByWeek.get(w);
+      const status = deriveDisplayStatus(e);
+
+      if (status === "Open") openCount += 1;
+      if (status === "In Progress") inProgressCount += 1;
+      if (status === "Complete") completeCount += 1;
     }
 
-    const inProgress = Math.max(0, answered - complete);
-    const remaining = Math.max(0, 52 - complete);
-
-    return { answered, inProgress, complete, remaining };
+    return { openCount, inProgressCount, completeCount };
   }, [entryByWeek]);
 
   const progressPct = useMemo(() => {
-    return Math.round((lifecycle.complete / 52) * 100);
-  }, [lifecycle.complete]);
+    return Math.round((lifecycle.completeCount / 52) * 100);
+  }, [lifecycle.completeCount]);
 
   const startEndDates = useMemo(() => {
     if (!startDate) return { startText: "-", endText: "-" };
     const start = new Date(startDate + "T00:00:00Z");
-    // 52 weeks total: week 1 is start date; projected end is start + 51*7 days
     const projectedEnd = addDays(start, 51 * 7);
     return {
       startText: formatDateShort(start),
@@ -185,32 +181,35 @@ export default function DashboardOverviewClient() {
     };
   }, [startDate]);
 
-  const rows = useMemo(() => {
+  // Build row models, then split into two lists:
+  // - Complete list (sorted week low -> high)
+  // - In Progress + Open (In Progress first, then Open; within each sorted week low -> high)
+  const rowLists = useMemo(() => {
     const base = startDate ? new Date(startDate + "T00:00:00Z") : null;
 
-    const computed = prompts.map((p) => {
-      const e = entryByWeek.get(p.week);
-      const displayStatus = deriveDisplayStatus(e);
-      const scheduled = base ? addDays(base, (p.week - 1) * 7) : null;
+    const all = prompts
+      .map((p) => {
+        const e = entryByWeek.get(p.week);
+        const displayStatus = deriveDisplayStatus(e);
+        const scheduled = base ? addDays(base, (p.week - 1) * 7) : null;
 
-      return {
-        week: p.week,
-        title: p.title,
-        scheduledText: scheduled ? formatDateShort(scheduled) : "-",
-        displayStatus,
-        canToggle: displayStatus !== "Open"
-      };
-    });
+        return {
+          week: p.week,
+          title: p.title,
+          scheduledText: scheduled ? formatDateShort(scheduled) : "-",
+          displayStatus,
+          entry: e
+        };
+      })
+      .sort((a, b) => a.week - b.week);
 
-    // Open first, then In Progress, then Complete; newest first within each bucket
-    computed.sort((a, b) => {
-      const ra = statusRank(a.displayStatus);
-      const rb = statusRank(b.displayStatus);
-      if (ra !== rb) return ra - rb;
-      return b.week - a.week;
-    });
+    const complete = all.filter((r) => r.displayStatus === "Complete");
+    const inProgress = all.filter((r) => r.displayStatus === "In Progress");
+    const open = all.filter((r) => r.displayStatus === "Open");
 
-    return computed;
+    const notComplete = [...inProgress, ...open];
+
+    return { complete, notComplete };
   }, [prompts, entryByWeek, startDate]);
 
   function goToWeek(week: number) {
@@ -251,11 +250,92 @@ export default function DashboardOverviewClient() {
 
   const cardClass = "border rounded-xl p-4";
   const buttonClass = "rounded-lg border px-3 py-2";
+  const miniButtonClass = "rounded-lg border px-3 py-1.5 text-sm";
 
   function statusClass(status: DisplayStatus) {
     if (status === "Complete") return "text-green-700 font-semibold";
     if (status === "In Progress") return "text-blue-700 font-medium";
     return "text-gray-600";
+  }
+
+  function renderList(
+    label: string,
+    rows: Array<{ week: number; title: string; scheduledText: string; displayStatus: DisplayStatus }>,
+    allowToggle: boolean
+  ) {
+    return (
+      <div className={cardClass}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-lg font-semibold">{label}</div>
+          <div className="text-sm opacity-80">{rows.length} items</div>
+        </div>
+
+        <div className="mt-3 border rounded-lg overflow-hidden">
+          <div className="max-h-[320px] overflow-auto">
+            <table className="w-full text-left">
+              <thead className="sticky top-0 bg-white">
+                <tr className="border-b">
+                  <th className="py-2 px-3">Week</th>
+                  <th className="py-2 px-3">Question</th>
+                  <th className="py-2 px-3">Email date</th>
+                  <th className="py-2 px-3">Status</th>
+                  <th className="py-2 px-3">Action</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {rows.map((r) => {
+                  const isFuture = r.week > currentWeek;
+                  const rowOpacity = isFuture ? "opacity-60" : "";
+
+                  const e = entryByWeek.get(r.week);
+                  const canToggle = allowToggle && r.displayStatus !== "Open";
+                  const disabled = !canToggle || busyWeek === r.week;
+                  const toggleLabel = r.displayStatus === "Complete" ? "Unmark" : "Mark";
+
+                  return (
+                    <tr key={r.week} className={`border-b hover:bg-slate-50 ${rowOpacity}`}>
+                      <td className="py-3 px-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
+                        {r.week}
+                      </td>
+                      <td className="py-3 px-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
+                        {r.title}
+                      </td>
+                      <td className="py-3 px-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
+                        {r.scheduledText}
+                      </td>
+                      <td className={`py-3 px-3 cursor-pointer ${statusClass(r.displayStatus)}`} onClick={() => goToWeek(r.week)}>
+                        {r.displayStatus}
+                      </td>
+                      <td className="py-3 px-3">
+                        {r.displayStatus === "Open" ? (
+                          <button className={miniButtonClass} onClick={() => goToWeek(r.week)}>
+                            Start
+                          </button>
+                        ) : (
+                          <button
+                            className={miniButtonClass}
+                            disabled={disabled}
+                            onClick={() => (e ? toggleComplete(r.week) : goToWeek(r.week))}
+                            title="Toggle complete status"
+                          >
+                            {disabled ? "Saving..." : toggleLabel}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {rows.length === 0 ? (
+              <div className="p-3 text-sm opacity-80">No items.</div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -276,11 +356,11 @@ export default function DashboardOverviewClient() {
           </div>
         </div>
 
-        {/* Lifecycle + Progress */}
+        {/* Progress + lifecycle */}
         <div className={cardClass}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="font-semibold">
-              Progress: {lifecycle.complete} of 52 complete
+              Progress: {lifecycle.completeCount} of 52 complete
             </div>
             <div className="text-sm opacity-80">{progressPct}%</div>
           </div>
@@ -292,34 +372,28 @@ export default function DashboardOverviewClient() {
             />
           </div>
 
-          {/* Start / Projected End dates */}
           <div className="flex items-center justify-between gap-3 mt-2 text-xs opacity-80">
             <div>Start date: {startEndDates.startText}</div>
             <div>Projected end date: {startEndDates.endText}</div>
           </div>
 
-          {/* Lifecycle intelligence */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-            <div className="border rounded-lg p-3">
-              <div className="text-xs opacity-70">Answered</div>
-              <div className="text-lg font-semibold">{lifecycle.answered}</div>
-            </div>
+          <div className="grid grid-cols-3 gap-3 mt-4">
             <div className="border rounded-lg p-3">
               <div className="text-xs opacity-70">In Progress</div>
-              <div className="text-lg font-semibold">{lifecycle.inProgress}</div>
+              <div className="text-lg font-semibold">{lifecycle.inProgressCount}</div>
             </div>
             <div className="border rounded-lg p-3">
               <div className="text-xs opacity-70">Complete</div>
-              <div className="text-lg font-semibold">{lifecycle.complete}</div>
+              <div className="text-lg font-semibold">{lifecycle.completeCount}</div>
             </div>
             <div className="border rounded-lg p-3">
-              <div className="text-xs opacity-70">Remaining</div>
-              <div className="text-lg font-semibold">{lifecycle.remaining}</div>
+              <div className="text-xs opacity-70">Remaining Open</div>
+              <div className="text-lg font-semibold">{lifecycle.openCount}</div>
             </div>
           </div>
 
           <div className="text-xs opacity-70 mt-3">
-            Answered = any non-empty writing. Complete = you explicitly marked that week done.
+            Remaining Open = untouched or blank. In Progress = has writing but not marked complete.
           </div>
         </div>
 
@@ -327,69 +401,15 @@ export default function DashboardOverviewClient() {
 
         {message && <div className={cardClass}>{message}</div>}
 
-        <div className={cardClass}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="border-b">
-                  <th className="py-2 pr-3">Week</th>
-                  <th className="py-2 pr-3">Question</th>
-                  <th className="py-2 pr-3">Email date</th>
-                  <th className="py-2 pr-3">Status</th>
-                  <th className="py-2">Complete</th>
-                </tr>
-              </thead>
+        {/* Two fixed, scrollable containers */}
+        {renderList("Complete", rowLists.complete, true)}
+        {renderList("In Progress + Open", rowLists.notComplete, true)}
 
-              <tbody>
-                {rows.map((r) => {
-                  const isFuture = r.week > currentWeek;
-                  const rowClass = `${isFuture ? "opacity-60" : ""}`;
-
-                  const disabled = !r.canToggle || busyWeek === r.week;
-                  const toggleLabel = r.displayStatus === "Complete" ? "Unmark" : "Mark";
-
-                  return (
-                    <tr key={r.week} className={`border-b hover:bg-slate-50 ${rowClass}`}>
-                      <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
-                        {r.week}
-                      </td>
-
-                      <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
-                        {r.title}
-                      </td>
-
-                      <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
-                        {r.scheduledText}
-                      </td>
-
-                      <td className={`py-3 pr-3 cursor-pointer ${statusClass(r.displayStatus)}`} onClick={() => goToWeek(r.week)}>
-                        {r.displayStatus}
-                      </td>
-
-                      <td className="py-3">
-                        {r.displayStatus === "Open" ? (
-                          <button className={buttonClass} onClick={() => goToWeek(r.week)}>
-                            Start
-                          </button>
-                        ) : (
-                          <button className={buttonClass} disabled={disabled} onClick={() => toggleComplete(r.week)}>
-                            {disabled ? "Saving..." : toggleLabel}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {!startDate ? (
+          <div className="text-sm opacity-80">
+            Your profile start date is not set yet, so email dates cannot be calculated.
           </div>
-
-          {!startDate ? (
-            <div className="text-sm opacity-80 mt-3">
-              Your profile start date is not set yet, so email dates cannot be calculated.
-            </div>
-          ) : null}
-        </div>
+        ) : null}
       </div>
     </div>
   );
