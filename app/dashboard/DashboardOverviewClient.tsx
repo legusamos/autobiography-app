@@ -111,7 +111,9 @@ export default function DashboardOverviewClient() {
 
       const prof = profile as ProfileRow;
       setStartDate(prof?.start_date ?? null);
-      setCurrentWeek(prof?.start_date ? weekFromStartDate(prof.start_date) : 1);
+
+      if (prof?.start_date) setCurrentWeek(weekFromStartDate(prof.start_date));
+      else setCurrentWeek(1);
 
       const { data: promptRows, error: promptErr } = await supabase
         .from("prompts")
@@ -150,17 +152,38 @@ export default function DashboardOverviewClient() {
     return m;
   }, [entries]);
 
-  const completedCount = useMemo(() => {
-    return Array.from(entryByWeek.values()).filter((e) => {
+  // Lifecycle counts
+  const lifecycle = useMemo(() => {
+    let answered = 0;
+    let complete = 0;
+
+    for (const e of entryByWeek.values()) {
       const hasText = (e.content ?? "").trim().length > 0;
-      if (!hasText) return false;
-      return normalizeEntryStatus(e.status) === "complete";
-    }).length;
+      if (!hasText) continue;
+      answered += 1;
+      if (normalizeEntryStatus(e.status) === "complete") complete += 1;
+    }
+
+    const inProgress = Math.max(0, answered - complete);
+    const remaining = Math.max(0, 52 - complete);
+
+    return { answered, inProgress, complete, remaining };
   }, [entryByWeek]);
 
   const progressPct = useMemo(() => {
-    return Math.round((completedCount / 52) * 100);
-  }, [completedCount]);
+    return Math.round((lifecycle.complete / 52) * 100);
+  }, [lifecycle.complete]);
+
+  const startEndDates = useMemo(() => {
+    if (!startDate) return { startText: "-", endText: "-" };
+    const start = new Date(startDate + "T00:00:00Z");
+    // 52 weeks total: week 1 is start date; projected end is start + 51*7 days
+    const projectedEnd = addDays(start, 51 * 7);
+    return {
+      startText: formatDateShort(start),
+      endText: formatDateShort(projectedEnd)
+    };
+  }, [startDate]);
 
   const rows = useMemo(() => {
     const base = startDate ? new Date(startDate + "T00:00:00Z") : null;
@@ -179,6 +202,7 @@ export default function DashboardOverviewClient() {
       };
     });
 
+    // Open first, then In Progress, then Complete; newest first within each bucket
     computed.sort((a, b) => {
       const ra = statusRank(a.displayStatus);
       const rb = statusRank(b.displayStatus);
@@ -252,10 +276,12 @@ export default function DashboardOverviewClient() {
           </div>
         </div>
 
-        {/* Progress bar (should be visible) */}
+        {/* Lifecycle + Progress */}
         <div className={cardClass}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="font-semibold">Progress: {completedCount} of 52 complete</div>
+            <div className="font-semibold">
+              Progress: {lifecycle.complete} of 52 complete
+            </div>
             <div className="text-sm opacity-80">{progressPct}%</div>
           </div>
 
@@ -266,8 +292,34 @@ export default function DashboardOverviewClient() {
             />
           </div>
 
-          <div className="text-xs opacity-70 mt-2">
-            Complete means you explicitly marked that week done.
+          {/* Start / Projected End dates */}
+          <div className="flex items-center justify-between gap-3 mt-2 text-xs opacity-80">
+            <div>Start date: {startEndDates.startText}</div>
+            <div>Projected end date: {startEndDates.endText}</div>
+          </div>
+
+          {/* Lifecycle intelligence */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Answered</div>
+              <div className="text-lg font-semibold">{lifecycle.answered}</div>
+            </div>
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">In Progress</div>
+              <div className="text-lg font-semibold">{lifecycle.inProgress}</div>
+            </div>
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Complete</div>
+              <div className="text-lg font-semibold">{lifecycle.complete}</div>
+            </div>
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Remaining</div>
+              <div className="text-lg font-semibold">{lifecycle.remaining}</div>
+            </div>
+          </div>
+
+          <div className="text-xs opacity-70 mt-3">
+            Answered = any non-empty writing. Complete = you explicitly marked that week done.
           </div>
         </div>
 
@@ -301,15 +353,19 @@ export default function DashboardOverviewClient() {
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.week}
                       </td>
+
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.title}
                       </td>
+
                       <td className="py-3 pr-3 cursor-pointer" onClick={() => goToWeek(r.week)}>
                         {r.scheduledText}
                       </td>
+
                       <td className={`py-3 pr-3 cursor-pointer ${statusClass(r.displayStatus)}`} onClick={() => goToWeek(r.week)}>
                         {r.displayStatus}
                       </td>
+
                       <td className="py-3">
                         {r.displayStatus === "Open" ? (
                           <button className={buttonClass} onClick={() => goToWeek(r.week)}>
