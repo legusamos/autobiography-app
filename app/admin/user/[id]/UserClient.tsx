@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 
 type AnyRow = Record<string, any>;
 
-function isUuid(v: any) {
+function isUuid(v: any): v is string {
   if (typeof v !== "string") return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
@@ -33,20 +33,92 @@ export default function UserClient({ userId }: { userId: string }) {
   const [prompts, setPrompts] = useState<AnyRow[]>([]);
   const [entries, setEntries] = useState<AnyRow[]>([]);
 
+  // Admin control state
+  const [startDateDraft, setStartDateDraft] = useState<string>("");
+  const [emailPausedDraft, setEmailPausedDraft] = useState<boolean>(false);
+  const [resetWeek, setResetWeek] = useState<number>(1);
+  const [busy, setBusy] = useState<boolean>(false);
+
+  async function adminAction(payload: any) {
+    setBusy(true);
+    setMessage(null);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const token = sessionRes?.session?.access_token;
+
+    if (!token) {
+      setMessage("No session token. Please sign in again.");
+      setBusy(false);
+      return { ok: false };
+    }
+
+    const res = await fetch("/api/admin/user-actions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await res.json().catch(() => null);
+    if (!json?.ok) {
+      setMessage(json?.error ?? "Admin action failed.");
+      setBusy(false);
+      return { ok: false };
+    }
+
+    setBusy(false);
+    return { ok: true };
+  }
+
+  async function reloadData() {
+    setLoading(true);
+    setMessage(null);
+
+    const profRes = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (profRes.error) {
+      setMessage(`Profile load error: ${profRes.error.message}`);
+      setLoading(false);
+      return;
+    }
+
+    setProfile(profRes.data ?? null);
+
+    const promptRes = await supabase
+      .from("prompts")
+      .select("week, title, active")
+      .eq("active", true)
+      .order("week", { ascending: true });
+
+    if (!promptRes.error) setPrompts(promptRes.data ?? []);
+
+    const entryRes = await supabase
+      .from("entries")
+      .select("id, user_id, week, content, status, updated_at, created_at")
+      .eq("user_id", userId)
+      .order("week", { ascending: true });
+
+    if (!entryRes.error) setEntries(entryRes.data ?? []);
+
+    setLoading(false);
+  }
+
   useEffect(() => {
     async function boot() {
       setMessage(null);
 
-      // HARD GUARD: if invalid, stop before any Supabase call.
       if (!isUuid(userId)) {
-        console.error("Admin user view invalid userId:", userId);
         setMessage(`Invalid user id received: "${userId}"`);
         setCheckingAdmin(false);
         setLoading(false);
         return;
       }
-
-      console.log("Admin user view userId:", userId);
 
       const { data: auth } = await supabase.auth.getUser();
       if (!auth.user) {
@@ -69,55 +141,18 @@ export default function UserClient({ userId }: { userId: string }) {
 
       setCheckingAdmin(false);
 
-      // Profile
-      const profRes = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", userId)
-        .single();
-
-      if (profRes.error) {
-        console.error("Profile load error details:", profRes.error);
-        setMessage(`Profile load error: ${profRes.error.message}`);
-        setLoading(false);
-        return;
-      }
-
-      setProfile(profRes.data ?? null);
-
-      // Prompts
-      const promptRes = await supabase
-        .from("prompts")
-        .select("week, title, active")
-        .eq("active", true)
-        .order("week", { ascending: true });
-
-      if (promptRes.error) {
-        console.error("Prompt load error details:", promptRes.error);
-        setMessage(`Prompt load error: ${promptRes.error.message}`);
-      } else {
-        setPrompts(promptRes.data ?? []);
-      }
-
-      // Entries for that user
-      const entryRes = await supabase
-        .from("entries")
-        .select("id, user_id, week, content, status, updated_at, created_at")
-        .eq("user_id", userId)
-        .order("week", { ascending: true });
-
-      if (entryRes.error) {
-        console.error("Entry load error details:", entryRes.error);
-        setMessage(`Entry load error: ${entryRes.error.message}`);
-      } else {
-        setEntries(entryRes.data ?? []);
-      }
-
-      setLoading(false);
+      await reloadData();
     }
 
     void boot();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, userId]);
+
+  useEffect(() => {
+    if (!profile) return;
+    setStartDateDraft(String(profile.start_date ?? ""));
+    setEmailPausedDraft(Boolean(profile.email_paused));
+  }, [profile]);
 
   const promptCount = useMemo(() => (prompts.length > 0 ? prompts.length : 52), [prompts.length]);
 
@@ -171,33 +206,57 @@ export default function UserClient({ userId }: { userId: string }) {
     return out;
   }, [promptCount, entryByWeek, promptTitleByWeek]);
 
-  function exportJson() {
-    const payload = {
-      exported_at: new Date().toISOString(),
-      user: {
-        id: userId,
-        preferred_name: profile?.preferred_name ?? null,
-        email: profile?.email ?? null,
-        start_date: profile?.start_date ?? null
-      },
-      entries: weeks.map((w) => ({
-        week: w.week,
-        prompt_title: w.title,
-        status: w.status,
-        content: w.content,
-        updated_at: w.updated_at
-      }))
-    };
+  async function saveStartDate() {
+    const start = startDateDraft.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) {
+      setMessage("Start date must be YYYY-MM-DD.");
+      return;
+    }
 
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
+    const res = await adminAction({
+      action: "set_start_date",
+      target_user_id: userId,
+      start_date: start
+    });
 
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `user-${userId}-autobiography.json`;
-    a.click();
+    if (res.ok) await reloadData();
+  }
 
-    URL.revokeObjectURL(url);
+  async function togglePaused() {
+    const res = await adminAction({
+      action: "set_email_paused",
+      target_user_id: userId,
+      email_paused: !emailPausedDraft
+    });
+
+    if (res.ok) await reloadData();
+  }
+
+async function doResetWeek() {
+  const ok = window.confirm(`Are you sure you want to reset Week ${resetWeek}? This will clear the user's entry for that week.`);
+  if (!ok) return;
+
+  const res = await adminAction({
+    action: "reset_week",
+    target_user_id: userId,
+    week: resetWeek
+  });
+
+  if (res.ok) await reloadData();
+}
+
+  async function doResetAll() {
+    const ok = window.confirm(
+      "Reset ALL entries for this user? This deletes their entire writing history."
+    );
+    if (!ok) return;
+
+    const res = await adminAction({
+      action: "reset_all",
+      target_user_id: userId
+    });
+
+    if (res.ok) await reloadData();
   }
 
   if (checkingAdmin) return <div className="p-6">Checking admin access...</div>;
@@ -238,19 +297,67 @@ export default function UserClient({ userId }: { userId: string }) {
             <button className={buttonClass} onClick={() => router.push("/admin")}>
               Back to Admin
             </button>
-            <button className={buttonClass} onClick={exportJson}>
-              Export JSON
-            </button>
           </div>
         </div>
 
         {message ? <div className={cardClass}>{message}</div> : null}
 
+        {/* Admin Controls */}
         <div className={cardClass}>
           <div className="text-sm opacity-80">Email: {profile?.email ?? "-"}</div>
-          <div className="text-sm opacity-80">Start date: {profile?.start_date ?? "-"}</div>
+
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Start date (YYYY-MM-DD)</div>
+              <input
+                className="mt-2 w-full border rounded-lg px-3 py-2"
+                value={startDateDraft}
+                onChange={(e) => setStartDateDraft(e.target.value)}
+                disabled={busy}
+              />
+              <button className={`${buttonClass} mt-2`} onClick={saveStartDate} disabled={busy}>
+                Save start date
+              </button>
+            </div>
+
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Weekly emails</div>
+              <div className="mt-2 text-sm">
+                Status: <span className="font-semibold">{emailPausedDraft ? "Paused" : "Active"}</span>
+              </div>
+              <button className={`${buttonClass} mt-2`} onClick={togglePaused} disabled={busy}>
+                {emailPausedDraft ? "Resume emails" : "Pause emails"}
+              </button>
+            </div>
+
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Reset tools</div>
+              <div className="mt-2 flex items-center gap-2">
+                <select
+                  className="border rounded-lg px-3 py-2"
+                  value={resetWeek}
+                  onChange={(e) => setResetWeek(Number(e.target.value))}
+                  disabled={busy}
+                >
+                  {Array.from({ length: 52 }, (_, i) => i + 1).map((w) => (
+                    <option key={w} value={w}>
+                      Week {w}
+                    </option>
+                  ))}
+                </select>
+                <button className={buttonClass} onClick={doResetWeek} disabled={busy}>
+                  Reset week
+                </button>
+              </div>
+
+              <button className={`${buttonClass} mt-2`} onClick={doResetAll} disabled={busy}>
+                Reset ALL
+              </button>
+            </div>
+          </div>
         </div>
 
+        {/* Weeks Table */}
         <div className={cardClass}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-lg font-semibold">Weeks</div>
