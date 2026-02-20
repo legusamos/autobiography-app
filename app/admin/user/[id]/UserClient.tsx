@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
@@ -39,6 +39,9 @@ export default function UserClient({ userId }: { userId: string }) {
   const [resetWeek, setResetWeek] = useState<number>(1);
   const [busy, setBusy] = useState<boolean>(false);
 
+  // Inline expanded row state
+  const [expandedWeek, setExpandedWeek] = useState<number | null>(null);
+
   async function adminAction(payload: any) {
     setBusy(true);
     setMessage(null);
@@ -49,7 +52,7 @@ export default function UserClient({ userId }: { userId: string }) {
     if (!token) {
       setMessage("No session token. Please sign in again.");
       setBusy(false);
-      return { ok: false };
+      return { ok: false, result: null };
     }
 
     const res = await fetch("/api/admin/user-actions", {
@@ -65,29 +68,56 @@ export default function UserClient({ userId }: { userId: string }) {
     if (!json?.ok) {
       setMessage(json?.error ?? "Admin action failed.");
       setBusy(false);
-      return { ok: false };
+      return { ok: false, result: null };
     }
 
     setBusy(false);
-    return { ok: true };
+    return { ok: true, result: json.result ?? null };
+  }
+
+  async function adminAuthAction(payload: any) {
+    setBusy(true);
+    setMessage(null);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const token = sessionRes?.session?.access_token;
+
+    if (!token) {
+      setMessage("No session token. Please sign in again.");
+      setBusy(false);
+      return { ok: false, result: null };
+    }
+
+    const res = await fetch("/api/admin/auth-actions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await res.json().catch(() => null);
+    if (!json?.ok) {
+      setMessage(json?.error ?? "Admin auth action failed.");
+      setBusy(false);
+      return { ok: false, result: null };
+    }
+
+    setBusy(false);
+    return { ok: true, result: json.result ?? null };
   }
 
   async function reloadData() {
     setLoading(true);
     setMessage(null);
 
-    const profRes = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .single();
-
+    const profRes = await supabase.from("profiles").select("*").eq("id", userId).single();
     if (profRes.error) {
       setMessage(`Profile load error: ${profRes.error.message}`);
       setLoading(false);
       return;
     }
-
     setProfile(profRes.data ?? null);
 
     const promptRes = await supabase
@@ -95,15 +125,13 @@ export default function UserClient({ userId }: { userId: string }) {
       .select("week, title, active")
       .eq("active", true)
       .order("week", { ascending: true });
-
     if (!promptRes.error) setPrompts(promptRes.data ?? []);
 
     const entryRes = await supabase
       .from("entries")
-      .select("id, user_id, week, content, status, updated_at, created_at")
+      .select("id, user_id, week, prompt_key, content, status, updated_at, created_at")
       .eq("user_id", userId)
       .order("week", { ascending: true });
-
     if (!entryRes.error) setEntries(entryRes.data ?? []);
 
     setLoading(false);
@@ -140,7 +168,6 @@ export default function UserClient({ userId }: { userId: string }) {
       }
 
       setCheckingAdmin(false);
-
       await reloadData();
     }
 
@@ -232,18 +259,23 @@ export default function UserClient({ userId }: { userId: string }) {
     if (res.ok) await reloadData();
   }
 
-async function doResetWeek() {
-  const ok = window.confirm(`Are you sure you want to reset Week ${resetWeek}? This will clear the user's entry for that week.`);
-  if (!ok) return;
+  async function doResetWeek() {
+    const ok = window.confirm(
+      `Are you sure you want to reset Week ${resetWeek}? This will clear the user's entry for that week.`
+    );
+    if (!ok) return;
 
-  const res = await adminAction({
-    action: "reset_week",
-    target_user_id: userId,
-    week: resetWeek
-  });
+    const res = await adminAction({
+      action: "reset_week",
+      target_user_id: userId,
+      week: resetWeek
+    });
 
-  if (res.ok) await reloadData();
-}
+    if (res.ok) {
+      setExpandedWeek(null);
+      await reloadData();
+    }
+  }
 
   async function doResetAll() {
     const ok = window.confirm(
@@ -256,7 +288,52 @@ async function doResetWeek() {
       target_user_id: userId
     });
 
+    if (res.ok) {
+      setExpandedWeek(null);
+      await reloadData();
+    }
+  }
+
+  async function toggleDisabled() {
+    const next = !Boolean(profile?.disabled);
+    const ok = window.confirm(
+      next
+        ? "Disable this user? They will be blocked from using the app."
+        : "Enable this user?"
+    );
+    if (!ok) return;
+
+    const res = await adminAuthAction({
+      action: "set_disabled",
+      target_user_id: userId,
+      disabled: next
+    });
+
     if (res.ok) await reloadData();
+  }
+
+  async function sendLoginLink() {
+    const ok = window.confirm("Send a login link (magic link) to this user?");
+    if (!ok) return;
+
+    const res = await adminAuthAction({
+      action: "send_magic_link",
+      target_user_id: userId
+    });
+
+    if (res.ok) setMessage("Login link requested.");
+  }
+
+  async function sendPasswordReset() {
+    const ok = window.confirm("Send a password reset link to this user?");
+    if (!ok) return;
+
+    const res = await adminAuthAction({
+      action: "send_password_reset",
+      target_user_id: userId
+    });
+
+    if (res.ok) setMessage("Password reset link requested.");
   }
 
   if (checkingAdmin) return <div className="p-6">Checking admin access...</div>;
@@ -302,11 +379,10 @@ async function doResetWeek() {
 
         {message ? <div className={cardClass}>{message}</div> : null}
 
-        {/* Admin Controls */}
         <div className={cardClass}>
           <div className="text-sm opacity-80">Email: {profile?.email ?? "-"}</div>
 
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
             <div className="border rounded-lg p-3">
               <div className="text-xs opacity-70">Start date (YYYY-MM-DD)</div>
               <input
@@ -323,7 +399,8 @@ async function doResetWeek() {
             <div className="border rounded-lg p-3">
               <div className="text-xs opacity-70">Weekly emails</div>
               <div className="mt-2 text-sm">
-                Status: <span className="font-semibold">{emailPausedDraft ? "Paused" : "Active"}</span>
+                Status:{" "}
+                <span className="font-semibold">{emailPausedDraft ? "Paused" : "Active"}</span>
               </div>
               <button className={`${buttonClass} mt-2`} onClick={togglePaused} disabled={busy}>
                 {emailPausedDraft ? "Resume emails" : "Pause emails"}
@@ -354,18 +431,38 @@ async function doResetWeek() {
                 Reset ALL
               </button>
             </div>
+
+            <div className="border rounded-lg p-3">
+              <div className="text-xs opacity-70">Account</div>
+
+              <div className="mt-2 text-sm">
+                Disabled:{" "}
+                <span className="font-semibold">{profile?.disabled ? "Yes" : "No"}</span>
+              </div>
+
+              <button className={`${buttonClass} mt-2`} onClick={toggleDisabled} disabled={busy}>
+                {profile?.disabled ? "Enable user" : "Disable user"}
+              </button>
+
+              <button className={`${buttonClass} mt-2`} onClick={sendLoginLink} disabled={busy}>
+                Send login link
+              </button>
+
+              <button className={`${buttonClass} mt-2`} onClick={sendPasswordReset} disabled={busy}>
+                Send password reset
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Weeks Table */}
         <div className={cardClass}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-lg font-semibold">Weeks</div>
-            <div className="text-sm opacity-80">{weeks.length} total</div>
+            <div className="text-sm opacity-80">Click a row to expand</div>
           </div>
 
           <div className="mt-3 border rounded-lg overflow-hidden">
-            <div className="max-h-[560px] overflow-auto">
+            <div className="max-h-[640px] overflow-auto">
               <table className="w-full text-left">
                 <thead className="sticky top-0 bg-white">
                   <tr className="border-b">
@@ -376,26 +473,56 @@ async function doResetWeek() {
                     <th className={thClass}>Preview</th>
                   </tr>
                 </thead>
+
                 <tbody>
-                  {weeks.map((w) => (
-                    <tr key={w.week} className={`border-b ${rowBg(w.status)}`}>
-                      <td className={tdClass}>{w.week}</td>
-                      <td className={tdClass}>{w.title}</td>
-                      <td className={`${tdClass} ${statusColor(w.status)}`}>{w.status}</td>
-                      <td className={tdClass}>{formatDateTime(w.updated_at)}</td>
-                      <td className={tdClass}>
-                        {isNonEmptyText(w.content)
-                          ? w.content.slice(0, 90) + (w.content.length > 90 ? "..." : "")
-                          : "-"}
-                      </td>
-                    </tr>
-                  ))}
+                  {weeks.map((w) => {
+                    const isExpanded = expandedWeek === w.week;
+
+                    return (
+                      <Fragment key={w.week}>
+                        <tr
+                          className={`border-b ${rowBg(w.status)} cursor-pointer`}
+                          onClick={() => setExpandedWeek(isExpanded ? null : w.week)}
+                        >
+                          <td className={tdClass}>
+                            <span className="opacity-60 mr-2">{isExpanded ? "▾" : "▸"}</span>
+                            {w.week}
+                          </td>
+                          <td className={tdClass}>{w.title}</td>
+                          <td className={`${tdClass} ${statusColor(w.status)}`}>{w.status}</td>
+                          <td className={tdClass}>{formatDateTime(w.updated_at)}</td>
+                          <td className={tdClass}>
+                            {isNonEmptyText(w.content)
+                              ? w.content.slice(0, 90) + (w.content.length > 90 ? "..." : "")
+                              : "-"}
+                          </td>
+                        </tr>
+
+                        {isExpanded ? (
+                          <tr className={`border-b ${rowBg(w.status)}`}>
+                            <td className={tdClass} colSpan={5}>
+                              <div className="border rounded-lg p-3 bg-white">
+                                <div className="text-sm opacity-80">
+                                  Week {w.week} • {w.title}
+                                </div>
+                                <div className="mt-2 whitespace-pre-wrap text-sm">
+                                  {isNonEmptyText(w.content) ? w.content : "(No content)"}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
 
-          <div className="mt-3 text-xs opacity-70">Admin view is read-only for now.</div>
+          <div className="mt-3 text-xs opacity-70">
+            Tip: click the same row again to collapse it.
+          </div>
         </div>
       </div>
     </div>
