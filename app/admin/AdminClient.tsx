@@ -4,6 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
+const BUILD_STAMP =
+  process.env.NEXT_PUBLIC_BUILD_STAMP ||
+  process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
+  "local";
+
 type Row = {
   id: string;
   email: string | null;
@@ -257,7 +262,12 @@ export default function AdminClient() {
   return (
     <div className="max-w-6xl mx-auto p-4 space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-xl font-semibold">Admin Dashboard</h1>
+<div className="flex items-baseline gap-2">
+  <h1 className="text-xl font-semibold">Admin Dashboard</h1>
+  <span className="text-[11px] opacity-60">
+    build: {String(BUILD_STAMP).slice(0, 10)}
+  </span>
+</div>
         <div className="flex gap-2">
           <button className={btn} onClick={fetchOverview}>
             Refresh
