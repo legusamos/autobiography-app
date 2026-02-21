@@ -50,9 +50,7 @@ function daysSince(d: string | null) {
 
 async function safeReadJson(res: Response) {
   const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    return await res.json().catch(() => null);
-  }
+  if (ct.includes("application/json")) return await res.json().catch(() => null);
   const text = await res.text().catch(() => "");
   return { ok: false, error: text ? text.slice(0, 300) : "Non-JSON response" };
 }
@@ -94,11 +92,7 @@ export default function AdminClient() {
     const json = await safeReadJson(res);
 
     if (!res.ok || !json?.ok) {
-      const errText =
-        json?.error ??
-        json?.message ??
-        "Unknown error (no JSON body returned).";
-
+      const errText = json?.error ?? json?.message ?? "Unknown error.";
       setMessage(`Users overview failed (HTTP ${res.status}): ${errText}`);
       setLoading(false);
       return;
@@ -188,14 +182,14 @@ export default function AdminClient() {
     function cmp(a: Row, b: Row) {
       const dir = sortDir === "asc" ? 1 : -1;
 
-      const av: any = (a as any)[sortKey];
-      const bv: any = (b as any)[sortKey];
-
       if (sortKey === "last_activity") {
         const at = a.last_activity ? new Date(a.last_activity).getTime() : 0;
         const bt = b.last_activity ? new Date(b.last_activity).getTime() : 0;
         return (at - bt) * dir;
       }
+
+      const av: any = (a as any)[sortKey];
+      const bv: any = (b as any)[sortKey];
 
       if (sortKey === "preferred_name" || sortKey === "email") {
         const as = String(av ?? "").toLowerCase();
@@ -219,6 +213,20 @@ export default function AdminClient() {
     copy.sort(cmp);
     return copy;
   }, [rows, sortKey, sortDir]);
+
+  // ===== Summary bar stats =====
+  const summary = useMemo(() => {
+    const total = rows.length;
+    const paused = rows.filter((r) => r.email_paused).length;
+    const disabled = rows.filter((r) => r.disabled).length;
+    const ready = rows.filter((r) => r.complete_count >= 52).length;
+    const needsAttention = rows.filter((r) => {
+      const d = daysSince(r.last_activity);
+      return d !== null && d >= 14 && r.complete_count < 52 && !r.disabled;
+    }).length;
+
+    return { total, paused, disabled, ready, needsAttention };
+  }, [rows]);
 
   const th = "px-3 py-2 text-xs font-semibold border-b cursor-pointer select-none";
   const td = "px-3 py-2 text-sm border-b align-top";
@@ -246,6 +254,36 @@ export default function AdminClient() {
         </div>
       </div>
 
+      {/* Summary bar */}
+      <div className="border rounded-xl p-3">
+        <div className="flex flex-wrap gap-3 text-sm">
+          <div className="px-3 py-2 border rounded-lg">
+            <div className="text-xs opacity-70">Users</div>
+            <div className="font-semibold">{summary.total}</div>
+          </div>
+
+          <div className="px-3 py-2 border rounded-lg">
+            <div className="text-xs opacity-70">Needs attention (14+ days)</div>
+            <div className="font-semibold">{summary.needsAttention}</div>
+          </div>
+
+          <div className="px-3 py-2 border rounded-lg">
+            <div className="text-xs opacity-70">Ready (52 complete)</div>
+            <div className="font-semibold">{summary.ready}</div>
+          </div>
+
+          <div className="px-3 py-2 border rounded-lg">
+            <div className="text-xs opacity-70">Emails paused</div>
+            <div className="font-semibold">{summary.paused}</div>
+          </div>
+
+          <div className="px-3 py-2 border rounded-lg">
+            <div className="text-xs opacity-70">Disabled</div>
+            <div className="font-semibold">{summary.disabled}</div>
+          </div>
+        </div>
+      </div>
+
       {message ? <div className="border rounded-xl p-3">{message}</div> : null}
 
       <div className="border rounded-xl overflow-hidden">
@@ -270,7 +308,8 @@ export default function AdminClient() {
             <tbody>
               {sorted.map((r) => {
                 const inactiveDays = daysSince(r.last_activity);
-                const needsAttention = inactiveDays !== null && inactiveDays >= 14;
+                const needsAttention =
+                  inactiveDays !== null && inactiveDays >= 14 && r.complete_count < 52 && !r.disabled;
                 const isDone = r.complete_count >= 52;
 
                 return (
