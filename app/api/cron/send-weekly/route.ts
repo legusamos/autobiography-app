@@ -1,110 +1,109 @@
 import { NextResponse } from "next/server";
 import { Resend } from "resend";
-import { createClient } from "@supabase/supabase-js";
+import { getAdminClient } from "@/lib/server/supabaseAdmin";
 
-export const runtime = "nodejs";
-
-function requireEnv(name: string): string {
+function mustEnv(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
 
-function getWeekFromStartDate(startDateISO: string): number {
-  const start = new Date(startDateISO + "T00:00:00Z");
-  const now = new Date();
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const days = Math.floor((now.getTime() - start.getTime()) / msPerDay);
-  const week = Math.floor(days / 7) + 1;
-  return Math.max(1, Math.min(52, week));
-}
-
 export async function GET(req: Request) {
   try {
-    const cronSecret = requireEnv("CRON_SECRET");
-    const url = new URL(req.url);
-    const token = url.searchParams.get("token");
-
-    if (token !== cronSecret) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    // Cron auth
+    const cronSecret = mustEnv("CRON_SECRET");
+    const authHeader = req.headers.get("authorization") || "";
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
 
-    const supabaseUrl = requireEnv("NEXT_PUBLIC_SUPABASE_URL");
-    const serviceRoleKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-    const resendKey = requireEnv("RESEND_API_KEY");
-    const appUrl = requireEnv("APP_URL");
+    const resend = new Resend(mustEnv("RESEND_API_KEY"));
+    const from = mustEnv("RESEND_FROM_EMAIL");
+    const appUrl = mustEnv("NEXT_PUBLIC_APP_URL");
 
-    const admin = createClient(supabaseUrl, serviceRoleKey);
-    const resend = new Resend(resendKey);
+    const adminClient = getAdminClient();
 
-    const { data: profiles, error } = await admin
+    // Get active, non-disabled users
+    const { data: profiles, error: profErr } = await adminClient
       .from("profiles")
-      .select("id, email, email_opt_in, start_date")
-      .eq("email_opt_in", true)
-      .not("start_date", "is", null);
+      .select("id, email, preferred_name, start_date, email_day, email_paused, disabled")
+      .eq("disabled", false);
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (profErr) {
+      return NextResponse.json({ ok: false, error: profErr.message }, { status: 500 });
     }
+
+    const now = new Date();
 
     let sent = 0;
-    let skipped = 0;
+    let skippedPaused = 0;
+    let skippedNoStart = 0;
+    let skippedNoEmail = 0;
 
     for (const p of profiles ?? []) {
-      if (!p.email || !p.start_date) {
-        skipped += 1;
+      if (!p?.email) {
+        skippedNoEmail++;
         continue;
       }
 
-      const week = getWeekFromStartDate(p.start_date);
+      if (p.email_paused) {
+        skippedPaused++;
+        continue;
+      }
 
-      const { data: promptRow, error: pErr } = await admin
+      if (!p.start_date) {
+        skippedNoStart++;
+        continue;
+      }
+
+      // Compute current week from start_date
+      const start = new Date(String(p.start_date) + "T00:00:00");
+      const diffMs = now.getTime() - start.getTime();
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      const week = Math.max(1, Math.min(52, Math.floor(diffDays / 7) + 1));
+
+      // Get prompt for that week
+      const { data: prompt, error: promptErr } = await adminClient
         .from("prompts")
-        .select("title, coaching, questions")
+        .select("week, title, question, prompt_key")
         .eq("week", week)
-        .eq("active", true)
         .single();
 
-      if (pErr || !promptRow) {
-        skipped += 1;
+      if (promptErr || !prompt) {
         continue;
       }
 
-      const questions: string[] = (promptRow.questions ?? []) as unknown as string[];
+      const link = `${appUrl}/week?week=${week}`;
 
-      const nextPath = `/dashboard?week=${week}`;
-      const link = `${appUrl}/login?next=${encodeURIComponent(nextPath)}`;
-
-      const subject = `Week ${week} Prompt: ${promptRow.title}`;
-
-      const html = `
-        <div style="font-family: Arial, sans-serif; line-height: 1.4;">
-          <h2 style="margin: 0 0 8px 0;">Week ${week}: ${promptRow.title}</h2>
-          <p style="margin: 0 0 12px 0;">${promptRow.coaching}</p>
-          <ol>
-            ${questions.map((q) => `<li style="margin-bottom: 8px;">${q}</li>`).join("")}
-          </ol>
-          <p style="margin: 16px 0;">
-            <a href="${link}" style="display: inline-block; padding: 10px 14px; border: 1px solid #333; text-decoration: none; border-radius: 8px; font-weight: 600;">
-              Write this week’s entry
-            </a>
-          </p>
-        </div>
-      `;
-
-      const res = await resend.emails.send({
-        from: "Autobiography <weekly@autobiography.iconpublishingllc.com>",
+      await resend.emails.send({
+        from,
         to: p.email,
-        subject,
-        html
+        subject: `Week ${week}: ${prompt.title ?? "Your autobiography prompt"}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height:1.5">
+            <p>Hello${p.preferred_name ? " " + String(p.preferred_name) : ""},</p>
+            <p><strong>Week ${week}</strong></p>
+            <p>${prompt.question ? String(prompt.question) : ""}</p>
+            <p><a href="${link}">Open this week’s question</a></p>
+            <p style="opacity:0.7;font-size:12px">If you did not request these emails, you can ignore this message.</p>
+          </div>
+        `
       });
 
-      if (!("error" in res)) sent += 1;
-      else skipped += 1;
+      sent++;
     }
 
-    return NextResponse.json({ ok: true, sent, skipped, total: (profiles ?? []).length });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message || "Unknown error" }, { status: 500 });
+    return NextResponse.json({
+      ok: true,
+      sent,
+      skippedPaused,
+      skippedNoStart,
+      skippedNoEmail
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? "Server error" },
+      { status: 500 }
+    );
   }
 }

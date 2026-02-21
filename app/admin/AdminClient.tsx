@@ -4,300 +4,389 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type AnyRow = Record<string, any>;
+type Row = {
+  id: string;
+  email: string | null;
+  preferred_name: string | null;
+  start_date: string | null;
+  current_week: number | null;
 
-type UserRow = {
-  id: string; // must be uuid string
-  email?: string | null;
-  preferred_name?: string | null;
-  start_date?: string | null;
-  complete: number;
-  in_progress: number;
-  open: number;
-  last_activity?: string | null;
+  email_paused: boolean;
+  disabled: boolean;
+
+  open_count: number;
+  in_progress_count: number;
+  complete_count: number;
+  percent_complete: number;
+  last_activity: string | null;
 };
 
-function isNonEmptyText(v: any) {
-  return typeof v === "string" && v.trim().length > 0;
-}
+type SortKey =
+  | "preferred_name"
+  | "email"
+  | "percent_complete"
+  | "complete_count"
+  | "in_progress_count"
+  | "open_count"
+  | "current_week"
+  | "last_activity"
+  | "email_paused"
+  | "disabled";
 
-function isUuid(v: any) {
-  if (typeof v !== "string") return false;
-  // Standard UUID v1-5 format
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
-
-function formatDateTime(d: string | null | undefined) {
+function formatDateTime(d: string | null) {
   if (!d) return "-";
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return d;
   return dt.toLocaleString();
 }
 
-function formatDate(d: string | null | undefined) {
-  if (!d) return "-";
-  const dt = new Date(d);
-  if (Number.isNaN(dt.getTime())) return d;
-  return dt.toLocaleDateString();
+function daysSince(d: string | null) {
+  if (!d) return null;
+  const t = new Date(d).getTime();
+  if (Number.isNaN(t)) return null;
+  const ms = Date.now() - t;
+  return Math.floor(ms / (1000 * 60 * 60 * 24));
+}
+
+async function safeReadJson(res: Response) {
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    return await res.json().catch(() => null);
+  }
+  const text = await res.text().catch(() => "");
+  return { ok: false, error: text ? text.slice(0, 300) : "Non-JSON response" };
 }
 
 export default function AdminClient() {
   const router = useRouter();
 
-  const [checkingAdmin, setCheckingAdmin] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState<Row[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
-  const [profiles, setProfiles] = useState<AnyRow[]>([]);
-  const [prompts, setPrompts] = useState<AnyRow[]>([]);
-  const [entries, setEntries] = useState<AnyRow[]>([]);
-  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("last_activity");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  useEffect(() => {
-    async function boot() {
-      setMessage(null);
+  async function fetchOverview() {
+    setLoading(true);
+    setMessage(null);
 
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) {
-        router.replace("/login");
-        return;
-      }
-
-      const { data: isAdmin, error: adminErr } = await supabase.rpc("is_admin");
-      if (adminErr) {
-        setMessage(`Admin check error: ${adminErr.message}`);
-        setCheckingAdmin(false);
-        setLoading(false);
-        return;
-      }
-
-      if (!isAdmin) {
-        router.replace("/dashboard");
-        return;
-      }
-
-      setCheckingAdmin(false);
-
-      const { data: promptRows, error: promptErr } = await supabase
-        .from("prompts")
-        .select("week, title, active")
-        .eq("active", true)
-        .order("week", { ascending: true });
-
-      if (promptErr) setMessage(`Prompt load error: ${promptErr.message}`);
-      setPrompts(promptRows ?? []);
-
-      const { data: profileRows, error: profErr } = await supabase
-        .from("profiles")
-        .select("id, email, preferred_name, start_date, created_at")
-        .order("created_at", { ascending: false });
-
-      if (profErr) setMessage(`Profile load error: ${profErr.message}`);
-      setProfiles(profileRows ?? []);
-
-      const { data: entryRows, error: entryErr } = await supabase
-        .from("entries")
-        .select("id, user_id, week, content, status, updated_at, created_at");
-
-      if (entryErr) setMessage(`Entry load error: ${entryErr.message}`);
-      setEntries(entryRows ?? []);
-
+    const { data: sessionRes, error: sessErr } = await supabase.auth.getSession();
+    if (sessErr) {
+      setMessage("Session error: " + sessErr.message);
       setLoading(false);
+      return;
     }
 
-    void boot();
-  }, [router]);
-
-  const promptCount = useMemo(() => (prompts.length > 0 ? prompts.length : 52), [prompts.length]);
-
-  const users: UserRow[] = useMemo(() => {
-    // Map entries by user_id and week
-    const byUser = new Map<string, Map<number, AnyRow>>();
-    for (const e of entries) {
-      const uid = typeof e.user_id === "string" ? e.user_id : "";
-      const week = Number(e.week);
-      if (!uid || !week) continue;
-      if (!byUser.has(uid)) byUser.set(uid, new Map());
-      byUser.get(uid)!.set(week, e);
+    const token = sessionRes?.session?.access_token;
+    if (!token) {
+      setMessage("No session token. Please sign in again.");
+      setLoading(false);
+      router.replace("/login");
+      return;
     }
 
-    const out: UserRow[] = profiles.map((p) => {
-      const rawId = p.id;
-      const id = typeof rawId === "string" ? rawId : "";
-
-      const perWeek = byUser.get(id) ?? new Map<number, AnyRow>();
-
-      let complete = 0;
-      let in_progress = 0;
-      let last_activity: string | null = null;
-
-      for (let w = 1; w <= promptCount; w++) {
-        const e = perWeek.get(w);
-        if (!e || !isNonEmptyText(e.content)) continue;
-
-        if (String(e.status) === "complete") complete += 1;
-        else in_progress += 1;
-
-        const updated = (e.updated_at as string | null) ?? (e.created_at as string | null) ?? null;
-        if (updated) {
-          if (!last_activity) last_activity = updated;
-          else {
-            const a = new Date(last_activity).getTime();
-            const b = new Date(updated).getTime();
-            if (b > a) last_activity = updated;
-          }
-        }
-      }
-
-      const open = Math.max(0, promptCount - (complete + in_progress));
-
-      return {
-        id,
-        email: (p.email as string | null) ?? null,
-        preferred_name: (p.preferred_name as string | null) ?? null,
-        start_date: (p.start_date as string | null) ?? null,
-        complete,
-        in_progress,
-        open,
-        last_activity
-      };
+    const res = await fetch("/api/admin/users-overview", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` }
     });
 
-    // Sort by last activity desc
-    out.sort((a, b) => {
-      const ta = a.last_activity ? new Date(a.last_activity).getTime() : 0;
-      const tb = b.last_activity ? new Date(b.last_activity).getTime() : 0;
-      return tb - ta;
-    });
+    const json = await safeReadJson(res);
 
-    return out;
-  }, [profiles, entries, promptCount]);
+    if (!res.ok || !json?.ok) {
+      const errText =
+        json?.error ??
+        json?.message ??
+        "Unknown error (no JSON body returned).";
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return users;
+      setMessage(`Users overview failed (HTTP ${res.status}): ${errText}`);
+      setLoading(false);
+      return;
+    }
 
-    return users.filter((u) => {
-      const email = (u.email ?? "").toLowerCase();
-      const name = (u.preferred_name ?? "").toLowerCase();
-      const id = (u.id ?? "").toLowerCase();
-      return email.includes(q) || name.includes(q) || id.includes(q);
-    });
-  }, [users, query]);
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    router.replace("/login");
+    setRows((json.result ?? []) as Row[]);
+    setLoading(false);
   }
 
-  if (checkingAdmin) return <div className="p-6">Checking admin access...</div>;
+  async function adminAction(payload: any) {
+    setMessage(null);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const token = sessionRes?.session?.access_token;
+
+    if (!token) {
+      setMessage("No session token. Please sign in again.");
+      return { ok: false };
+    }
+
+    const res = await fetch("/api/admin/user-actions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await safeReadJson(res);
+
+    if (!res.ok || !json?.ok) {
+      setMessage(`Admin action failed (HTTP ${res.status}): ${json?.error ?? "Unknown error"}`);
+      return { ok: false };
+    }
+
+    return { ok: true };
+  }
+
+  async function adminAuthAction(payload: any) {
+    setMessage(null);
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const token = sessionRes?.session?.access_token;
+
+    if (!token) {
+      setMessage("No session token. Please sign in again.");
+      return { ok: false };
+    }
+
+    const res = await fetch("/api/admin/auth-actions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await safeReadJson(res);
+
+    if (!res.ok || !json?.ok) {
+      setMessage(`Admin auth action failed (HTTP ${res.status}): ${json?.error ?? "Unknown error"}`);
+      return { ok: false };
+    }
+
+    return { ok: true };
+  }
+
+  useEffect(() => {
+    void fetchOverview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function toggleSort(k: SortKey) {
+    if (sortKey === k) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortKey(k);
+    setSortDir(k === "preferred_name" || k === "email" ? "asc" : "desc");
+  }
+
+  const sorted = useMemo(() => {
+    const copy = [...rows];
+
+    function cmp(a: Row, b: Row) {
+      const dir = sortDir === "asc" ? 1 : -1;
+
+      const av: any = (a as any)[sortKey];
+      const bv: any = (b as any)[sortKey];
+
+      if (sortKey === "last_activity") {
+        const at = a.last_activity ? new Date(a.last_activity).getTime() : 0;
+        const bt = b.last_activity ? new Date(b.last_activity).getTime() : 0;
+        return (at - bt) * dir;
+      }
+
+      if (sortKey === "preferred_name" || sortKey === "email") {
+        const as = String(av ?? "").toLowerCase();
+        const bs = String(bv ?? "").toLowerCase();
+        if (as < bs) return -1 * dir;
+        if (as > bs) return 1 * dir;
+        return 0;
+      }
+
+      if (sortKey === "email_paused" || sortKey === "disabled") {
+        const an = av ? 1 : 0;
+        const bn = bv ? 1 : 0;
+        return (an - bn) * dir;
+      }
+
+      const an = Number(av ?? 0);
+      const bn = Number(bv ?? 0);
+      return (an - bn) * dir;
+    }
+
+    copy.sort(cmp);
+    return copy;
+  }, [rows, sortKey, sortDir]);
+
+  const th = "px-3 py-2 text-xs font-semibold border-b cursor-pointer select-none";
+  const td = "px-3 py-2 text-sm border-b align-top";
+  const btn = "px-2 py-1 border rounded-md text-xs";
+
   if (loading) return <div className="p-6">Loading admin dashboard...</div>;
 
-  const cardClass = "border rounded-xl p-4";
-  const buttonClass = "rounded-lg border px-3 py-2";
-  const thClass = "py-2 px-3 text-xs";
-  const tdClass = "py-2 px-3 text-sm";
-
   return (
-    <div className="min-h-screen">
-      <div className="max-w-6xl mx-auto p-6 space-y-4">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h1 className="text-2xl font-semibold">Admin</h1>
-            <div className="text-sm opacity-80">User administration and progress review</div>
-          </div>
-
-          <div className="flex gap-2 flex-wrap">
-            <button className={buttonClass} onClick={() => router.push("/dashboard")}>
-              View user dashboard
-            </button>
-            <button className={buttonClass} onClick={signOut}>
-              Sign out
-            </button>
-          </div>
-        </div>
-
-        {message ? <div className={cardClass}>{message}</div> : null}
-
-        <div className={cardClass}>
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="font-semibold">Users</div>
-            <div className="text-sm opacity-80">{filtered.length} shown</div>
-          </div>
-
-          <div className="mt-3 flex items-center gap-2 flex-wrap">
-            <input
-              className="border rounded-lg px-3 py-2 w-full md:w-[420px]"
-              placeholder="Search by email, preferred name, or id"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <div className="text-xs opacity-70">Prompts counted: {promptCount}</div>
-          </div>
-
-          <div className="mt-3 border rounded-lg overflow-hidden">
-            <div className="max-h-[520px] overflow-auto">
-              <table className="w-full text-left">
-                <thead className="sticky top-0 bg-white">
-                  <tr className="border-b">
-                    <th className={thClass}>Preferred name</th>
-                    <th className={thClass}>Email</th>
-                    <th className={thClass}>User ID</th>
-                    <th className={thClass}>Start date</th>
-                    <th className={thClass}>Complete</th>
-                    <th className={thClass}>In Progress</th>
-                    <th className={thClass}>Open</th>
-                    <th className={thClass}>Last activity</th>
-                    <th className={thClass}></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((u) => {
-                    const canView = isUuid(u.id);
-
-                    return (
-                      <tr key={`${u.email ?? ""}-${u.id ?? ""}`} className="border-b hover:bg-slate-50">
-                        <td className={tdClass}>{u.preferred_name ?? "-"}</td>
-                        <td className={tdClass}>{u.email ?? "-"}</td>
-                        <td className={tdClass}>{u.id || "-"}</td>
-                        <td className={tdClass}>{formatDate(u.start_date)}</td>
-                        <td className={tdClass}>{u.complete}</td>
-                        <td className={tdClass}>{u.in_progress}</td>
-                        <td className={tdClass}>{u.open}</td>
-                        <td className={tdClass}>{formatDateTime(u.last_activity)}</td>
-                        <td className={tdClass}>
-                          <button
-                            className="rounded border px-3 py-1.5 text-sm"
-                            disabled={!canView}
-                            onClick={() => {
-                              if (!canView) return;
-                              router.push(`/admin/user/${u.id}`);
-                            }}
-                          >
-                            View
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {filtered.length === 0 ? (
-                    <tr>
-                      <td className="p-3 text-sm opacity-80" colSpan={9}>
-                        No users match your search.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="mt-3 text-xs opacity-70">
-            If any row shows a blank or non-UUID User ID, that profile record is invalid and should be deleted.
-          </div>
+    <div className="max-w-6xl mx-auto p-6 space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+        <div className="flex gap-2">
+          <button className={btn} onClick={fetchOverview}>
+            Refresh
+          </button>
+          <button
+            className={btn}
+            onClick={async () => {
+              await supabase.auth.signOut();
+              router.replace("/login");
+            }}
+          >
+            Sign out
+          </button>
         </div>
       </div>
+
+      {message ? <div className="border rounded-xl p-3">{message}</div> : null}
+
+      <div className="border rounded-xl overflow-hidden">
+        <div className="overflow-auto">
+          <table className="w-full text-left">
+            <thead className="bg-white sticky top-0">
+              <tr>
+                <th className={th} onClick={() => toggleSort("preferred_name")}>Name</th>
+                <th className={th} onClick={() => toggleSort("email")}>Email</th>
+                <th className={th} onClick={() => toggleSort("percent_complete")}>Progress</th>
+                <th className={th} onClick={() => toggleSort("current_week")}>Current week</th>
+                <th className={th} onClick={() => toggleSort("complete_count")}>Complete</th>
+                <th className={th} onClick={() => toggleSort("in_progress_count")}>In progress</th>
+                <th className={th} onClick={() => toggleSort("open_count")}>Open</th>
+                <th className={th} onClick={() => toggleSort("last_activity")}>Last activity</th>
+                <th className={th} onClick={() => toggleSort("email_paused")}>Emails</th>
+                <th className={th} onClick={() => toggleSort("disabled")}>Status</th>
+                <th className="px-3 py-2 text-xs font-semibold border-b">Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {sorted.map((r) => {
+                const inactiveDays = daysSince(r.last_activity);
+                const needsAttention = inactiveDays !== null && inactiveDays >= 14;
+                const isDone = r.complete_count >= 52;
+
+                return (
+                  <tr key={r.id} className={r.disabled ? "opacity-60" : ""}>
+                    <td className={td}>
+                      <div className="font-semibold">{r.preferred_name ?? "(No name)"}</div>
+                      {isDone ? (
+                        <div className="text-xs text-green-700">Ready (52 complete)</div>
+                      ) : needsAttention ? (
+                        <div className="text-xs text-red-700">Attention ({inactiveDays} days inactive)</div>
+                      ) : (
+                        <div className="text-xs opacity-70">-</div>
+                      )}
+                    </td>
+
+                    <td className={td}>{r.email ?? "-"}</td>
+
+                    <td className={td}>
+                      <div className="text-sm">{r.percent_complete}%</div>
+                      <div className="text-xs opacity-70">{r.complete_count}/52 complete</div>
+                    </td>
+
+                    <td className={td}>{r.current_week ?? "-"}</td>
+                    <td className={td}>{r.complete_count}</td>
+                    <td className={td}>{r.in_progress_count}</td>
+                    <td className={td}>{r.open_count}</td>
+                    <td className={td}>{formatDateTime(r.last_activity)}</td>
+
+                    <td className={td}>
+                      <div className="text-xs">
+                        {r.email_paused ? (
+                          <span className="text-orange-700">Paused</span>
+                        ) : (
+                          <span className="text-green-700">Active</span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className={td}>
+                      <div className="text-xs">
+                        {r.disabled ? (
+                          <span className="text-red-700">Disabled</span>
+                        ) : (
+                          <span className="text-green-700">Enabled</span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className={td}>
+                      <div className="flex flex-col gap-2">
+                        <button className={btn} onClick={() => router.push(`/admin/user/${r.id}`)}>
+                          View
+                        </button>
+
+                        <button
+                          className={btn}
+                          onClick={async () => {
+                            const ok = window.confirm(
+                              r.email_paused
+                                ? "Resume weekly emails for this user?"
+                                : "Pause weekly emails for this user?"
+                            );
+                            if (!ok) return;
+
+                            const res = await adminAction({
+                              action: "set_email_paused",
+                              target_user_id: r.id,
+                              email_paused: !r.email_paused
+                            });
+
+                            if (res.ok) await fetchOverview();
+                          }}
+                        >
+                          {r.email_paused ? "Resume emails" : "Pause emails"}
+                        </button>
+
+                        <button
+                          className={btn}
+                          onClick={async () => {
+                            const ok = window.confirm(
+                              r.disabled
+                                ? "Enable this user?"
+                                : "Disable this user? They will be blocked from the app."
+                            );
+                            if (!ok) return;
+
+                            const res = await adminAuthAction({
+                              action: "set_disabled",
+                              target_user_id: r.id,
+                              disabled: !r.disabled
+                            });
+
+                            if (res.ok) await fetchOverview();
+                          }}
+                        >
+                          {r.disabled ? "Enable user" : "Disable user"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {sorted.length === 0 ? (
+                <tr>
+                  <td className="p-6 text-sm opacity-70" colSpan={11}>
+                    No users found (non-admin).
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="text-xs opacity-60">Tip: click column headers to sort.</div>
     </div>
   );
 }
