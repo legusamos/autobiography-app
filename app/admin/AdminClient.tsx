@@ -33,6 +33,8 @@ type SortKey =
   | "email_paused"
   | "disabled";
 
+type FilterKey = "all" | "needs_attention" | "ready" | "paused" | "disabled";
+
 function formatDateTime(d: string | null) {
   if (!d) return "-";
   const dt = new Date(d);
@@ -64,6 +66,8 @@ export default function AdminClient() {
 
   const [sortKey, setSortKey] = useState<SortKey>("last_activity");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const [filter, setFilter] = useState<FilterKey>("all");
 
   async function fetchOverview() {
     setLoading(true);
@@ -176,8 +180,38 @@ export default function AdminClient() {
     setSortDir(k === "preferred_name" || k === "email" ? "asc" : "desc");
   }
 
+  // ===== Summary bar stats =====
+  const summary = useMemo(() => {
+    const total = rows.length;
+    const paused = rows.filter((r) => r.email_paused).length;
+    const disabled = rows.filter((r) => r.disabled).length;
+    const ready = rows.filter((r) => r.complete_count >= 52).length;
+    const needsAttention = rows.filter((r) => {
+      const d = daysSince(r.last_activity);
+      return d !== null && d >= 14 && r.complete_count < 52 && !r.disabled;
+    }).length;
+
+    return { total, paused, disabled, ready, needsAttention };
+  }, [rows]);
+
+  // ===== Filtered rows =====
+  const filteredRows = useMemo(() => {
+    const isNeedsAttention = (r: Row) => {
+      const d = daysSince(r.last_activity);
+      return d !== null && d >= 14 && r.complete_count < 52 && !r.disabled;
+    };
+
+    if (filter === "all") return rows;
+    if (filter === "needs_attention") return rows.filter(isNeedsAttention);
+    if (filter === "ready") return rows.filter((r) => r.complete_count >= 52);
+    if (filter === "paused") return rows.filter((r) => r.email_paused && !r.disabled);
+    if (filter === "disabled") return rows.filter((r) => r.disabled);
+    return rows;
+  }, [rows, filter]);
+
+  // ===== Sort after filter =====
   const sorted = useMemo(() => {
-    const copy = [...rows];
+    const copy = [...filteredRows];
 
     function cmp(a: Row, b: Row) {
       const dir = sortDir === "asc" ? 1 : -1;
@@ -212,25 +246,14 @@ export default function AdminClient() {
 
     copy.sort(cmp);
     return copy;
-  }, [rows, sortKey, sortDir]);
-
-  // ===== Summary bar stats =====
-  const summary = useMemo(() => {
-    const total = rows.length;
-    const paused = rows.filter((r) => r.email_paused).length;
-    const disabled = rows.filter((r) => r.disabled).length;
-    const ready = rows.filter((r) => r.complete_count >= 52).length;
-    const needsAttention = rows.filter((r) => {
-      const d = daysSince(r.last_activity);
-      return d !== null && d >= 14 && r.complete_count < 52 && !r.disabled;
-    }).length;
-
-    return { total, paused, disabled, ready, needsAttention };
-  }, [rows]);
+  }, [filteredRows, sortKey, sortDir]);
 
   const th = "px-3 py-2 text-xs font-semibold border-b cursor-pointer select-none";
   const td = "px-3 py-2 text-sm border-b align-top";
   const btn = "px-2 py-1 border rounded-md text-xs";
+
+  const filterBtn = (k: FilterKey) =>
+    `px-3 py-2 border rounded-lg text-sm ${filter === k ? "font-semibold" : ""}`;
 
   if (loading) return <div className="p-6">Loading admin dashboard...</div>;
 
@@ -254,7 +277,6 @@ export default function AdminClient() {
         </div>
       </div>
 
-      {/* Summary bar */}
       <div className="border rounded-xl p-3">
         <div className="flex flex-wrap gap-3 text-sm">
           <div className="px-3 py-2 border rounded-lg">
@@ -284,6 +306,40 @@ export default function AdminClient() {
         </div>
       </div>
 
+      {/* Filters */}
+      <div className="border rounded-xl p-3">
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="text-xs opacity-70 mr-2">Filter</div>
+
+          <button className={filterBtn("all")} onClick={() => setFilter("all")}>
+            All ({summary.total})
+          </button>
+
+          <button
+            className={filterBtn("needs_attention")}
+            onClick={() => setFilter("needs_attention")}
+          >
+            Needs attention ({summary.needsAttention})
+          </button>
+
+          <button className={filterBtn("ready")} onClick={() => setFilter("ready")}>
+            Ready ({summary.ready})
+          </button>
+
+          <button className={filterBtn("paused")} onClick={() => setFilter("paused")}>
+            Emails paused ({summary.paused})
+          </button>
+
+          <button className={filterBtn("disabled")} onClick={() => setFilter("disabled")}>
+            Disabled ({summary.disabled})
+          </button>
+
+          <div className="ml-auto text-xs opacity-70">
+            Showing {sorted.length} of {rows.length}
+          </div>
+        </div>
+      </div>
+
       {message ? <div className="border rounded-xl p-3">{message}</div> : null}
 
       <div className="border rounded-xl overflow-hidden">
@@ -291,16 +347,36 @@ export default function AdminClient() {
           <table className="w-full text-left">
             <thead className="bg-white sticky top-0">
               <tr>
-                <th className={th} onClick={() => toggleSort("preferred_name")}>Name</th>
-                <th className={th} onClick={() => toggleSort("email")}>Email</th>
-                <th className={th} onClick={() => toggleSort("percent_complete")}>Progress</th>
-                <th className={th} onClick={() => toggleSort("current_week")}>Current week</th>
-                <th className={th} onClick={() => toggleSort("complete_count")}>Complete</th>
-                <th className={th} onClick={() => toggleSort("in_progress_count")}>In progress</th>
-                <th className={th} onClick={() => toggleSort("open_count")}>Open</th>
-                <th className={th} onClick={() => toggleSort("last_activity")}>Last activity</th>
-                <th className={th} onClick={() => toggleSort("email_paused")}>Emails</th>
-                <th className={th} onClick={() => toggleSort("disabled")}>Status</th>
+                <th className={th} onClick={() => toggleSort("preferred_name")}>
+                  Name
+                </th>
+                <th className={th} onClick={() => toggleSort("email")}>
+                  Email
+                </th>
+                <th className={th} onClick={() => toggleSort("percent_complete")}>
+                  Progress
+                </th>
+                <th className={th} onClick={() => toggleSort("current_week")}>
+                  Current week
+                </th>
+                <th className={th} onClick={() => toggleSort("complete_count")}>
+                  Complete
+                </th>
+                <th className={th} onClick={() => toggleSort("in_progress_count")}>
+                  In progress
+                </th>
+                <th className={th} onClick={() => toggleSort("open_count")}>
+                  Open
+                </th>
+                <th className={th} onClick={() => toggleSort("last_activity")}>
+                  Last activity
+                </th>
+                <th className={th} onClick={() => toggleSort("email_paused")}>
+                  Emails
+                </th>
+                <th className={th} onClick={() => toggleSort("disabled")}>
+                  Status
+                </th>
                 <th className="px-3 py-2 text-xs font-semibold border-b">Actions</th>
               </tr>
             </thead>
@@ -319,7 +395,9 @@ export default function AdminClient() {
                       {isDone ? (
                         <div className="text-xs text-green-700">Ready (52 complete)</div>
                       ) : needsAttention ? (
-                        <div className="text-xs text-red-700">Attention ({inactiveDays} days inactive)</div>
+                        <div className="text-xs text-red-700">
+                          Attention ({inactiveDays} days inactive)
+                        </div>
                       ) : (
                         <div className="text-xs opacity-70">-</div>
                       )}
@@ -416,7 +494,7 @@ export default function AdminClient() {
               {sorted.length === 0 ? (
                 <tr>
                   <td className="p-6 text-sm opacity-70" colSpan={11}>
-                    No users found (non-admin).
+                    No users found for this filter.
                   </td>
                 </tr>
               ) : null}
