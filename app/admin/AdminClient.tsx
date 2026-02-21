@@ -180,7 +180,6 @@ export default function AdminClient() {
     setSortDir(k === "preferred_name" || k === "email" ? "asc" : "desc");
   }
 
-  // ===== Summary bar stats =====
   const summary = useMemo(() => {
     const total = rows.length;
     const paused = rows.filter((r) => r.email_paused).length;
@@ -194,7 +193,6 @@ export default function AdminClient() {
     return { total, paused, disabled, ready, needsAttention };
   }, [rows]);
 
-  // ===== Filtered rows =====
   const filteredRows = useMemo(() => {
     const isNeedsAttention = (r: Row) => {
       const d = daysSince(r.last_activity);
@@ -209,7 +207,6 @@ export default function AdminClient() {
     return rows;
   }, [rows, filter]);
 
-  // ===== Sort after filter =====
   const sorted = useMemo(() => {
     const copy = [...filteredRows];
 
@@ -248,19 +245,19 @@ export default function AdminClient() {
     return copy;
   }, [filteredRows, sortKey, sortDir]);
 
-  const th = "px-3 py-2 text-xs font-semibold border-b cursor-pointer select-none";
-  const td = "px-3 py-2 text-sm border-b align-top";
-  const btn = "px-2 py-1 border rounded-md text-xs";
-
+  // Dense table styling
+  const th = "px-2 py-1 text-[11px] font-semibold border-b cursor-pointer select-none whitespace-nowrap";
+  const td = "px-2 py-1 text-xs border-b align-top";
+  const btn = "px-2 py-1 border rounded-md text-[11px] whitespace-nowrap";
   const filterBtn = (k: FilterKey) =>
-    `px-3 py-2 border rounded-lg text-sm ${filter === k ? "font-semibold" : ""}`;
+    `px-2 py-1 border rounded-lg text-xs ${filter === k ? "font-semibold" : ""}`;
 
   if (loading) return <div className="p-6">Loading admin dashboard...</div>;
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-4">
+    <div className="max-w-6xl mx-auto p-4 space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+        <h1 className="text-xl font-semibold">Admin Dashboard</h1>
         <div className="flex gap-2">
           <button className={btn} onClick={fetchOverview}>
             Refresh
@@ -277,107 +274,96 @@ export default function AdminClient() {
         </div>
       </div>
 
-      <div className="border rounded-xl p-3">
-        <div className="flex flex-wrap gap-3 text-sm">
-          <div className="px-3 py-2 border rounded-lg">
-            <div className="text-xs opacity-70">Users</div>
+      <div className="border rounded-xl p-2">
+        <div className="flex flex-wrap gap-2 text-xs">
+          <div className="px-2 py-1 border rounded-lg">
+            <div className="opacity-70">Users</div>
             <div className="font-semibold">{summary.total}</div>
           </div>
-
-          <div className="px-3 py-2 border rounded-lg">
-            <div className="text-xs opacity-70">Needs attention (14+ days)</div>
+          <div className="px-2 py-1 border rounded-lg">
+            <div className="opacity-70">Needs attention</div>
             <div className="font-semibold">{summary.needsAttention}</div>
           </div>
-
-          <div className="px-3 py-2 border rounded-lg">
-            <div className="text-xs opacity-70">Ready (52 complete)</div>
+          <div className="px-2 py-1 border rounded-lg">
+            <div className="opacity-70">Ready</div>
             <div className="font-semibold">{summary.ready}</div>
           </div>
-
-          <div className="px-3 py-2 border rounded-lg">
-            <div className="text-xs opacity-70">Emails paused</div>
+          <div className="px-2 py-1 border rounded-lg">
+            <div className="opacity-70">Emails paused</div>
             <div className="font-semibold">{summary.paused}</div>
           </div>
-
-          <div className="px-3 py-2 border rounded-lg">
-            <div className="text-xs opacity-70">Disabled</div>
+          <div className="px-2 py-1 border rounded-lg">
+            <div className="opacity-70">Disabled</div>
             <div className="font-semibold">{summary.disabled}</div>
           </div>
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="border rounded-xl p-3">
+      <div className="border rounded-xl p-2">
         <div className="flex flex-wrap gap-2 items-center">
-          <div className="text-xs opacity-70 mr-2">Filter</div>
-
+          <div className="text-[11px] opacity-70 mr-1">Filter</div>
           <button className={filterBtn("all")} onClick={() => setFilter("all")}>
             All ({summary.total})
           </button>
-
-          <button
-            className={filterBtn("needs_attention")}
-            onClick={() => setFilter("needs_attention")}
-          >
+          <button className={filterBtn("needs_attention")} onClick={() => setFilter("needs_attention")}>
             Needs attention ({summary.needsAttention})
           </button>
-
           <button className={filterBtn("ready")} onClick={() => setFilter("ready")}>
             Ready ({summary.ready})
           </button>
-
           <button className={filterBtn("paused")} onClick={() => setFilter("paused")}>
-            Emails paused ({summary.paused})
+            Paused ({summary.paused})
           </button>
-
           <button className={filterBtn("disabled")} onClick={() => setFilter("disabled")}>
             Disabled ({summary.disabled})
           </button>
-
-          <div className="ml-auto text-xs opacity-70">
+          <div className="ml-auto text-[11px] opacity-70">
             Showing {sorted.length} of {rows.length}
           </div>
         </div>
       </div>
 
-      {message ? <div className="border rounded-xl p-3">{message}</div> : null}
+      {message ? <div className="border rounded-xl p-2 text-xs">{message}</div> : null}
 
       <div className="border rounded-xl overflow-hidden">
-        <div className="overflow-auto">
-          <table className="w-full text-left">
+        {/* remove horizontal scroll: allow wrapping, tighter columns */}
+        <div className="overflow-x-hidden">
+          <table className="w-full text-left table-fixed">
             <thead className="bg-white sticky top-0">
               <tr>
-                <th className={th} onClick={() => toggleSort("preferred_name")}>
+                <th className={th} style={{ width: "16%" }} onClick={() => toggleSort("preferred_name")}>
                   Name
                 </th>
-                <th className={th} onClick={() => toggleSort("email")}>
+                <th className={th} style={{ width: "18%" }} onClick={() => toggleSort("email")}>
                   Email
                 </th>
-                <th className={th} onClick={() => toggleSort("percent_complete")}>
+                <th className={th} style={{ width: "10%" }} onClick={() => toggleSort("percent_complete")}>
                   Progress
                 </th>
-                <th className={th} onClick={() => toggleSort("current_week")}>
-                  Current week
+                <th className={th} style={{ width: "8%" }} onClick={() => toggleSort("current_week")}>
+                  Week
                 </th>
-                <th className={th} onClick={() => toggleSort("complete_count")}>
-                  Complete
+                <th className={th} style={{ width: "7%" }} onClick={() => toggleSort("complete_count")}>
+                  Comp
                 </th>
-                <th className={th} onClick={() => toggleSort("in_progress_count")}>
-                  In progress
+                <th className={th} style={{ width: "7%" }} onClick={() => toggleSort("in_progress_count")}>
+                  Prog
                 </th>
-                <th className={th} onClick={() => toggleSort("open_count")}>
+                <th className={th} style={{ width: "7%" }} onClick={() => toggleSort("open_count")}>
                   Open
                 </th>
-                <th className={th} onClick={() => toggleSort("last_activity")}>
+                <th className={th} style={{ width: "15%" }} onClick={() => toggleSort("last_activity")}>
                   Last activity
                 </th>
-                <th className={th} onClick={() => toggleSort("email_paused")}>
-                  Emails
+                <th className={th} style={{ width: "6%" }} onClick={() => toggleSort("email_paused")}>
+                  Email
                 </th>
-                <th className={th} onClick={() => toggleSort("disabled")}>
-                  Status
+                <th className={th} style={{ width: "6%" }} onClick={() => toggleSort("disabled")}>
+                  User
                 </th>
-                <th className="px-3 py-2 text-xs font-semibold border-b">Actions</th>
+                <th className="px-2 py-1 text-[11px] font-semibold border-b whitespace-nowrap" style={{ width: "13%" }}>
+                  Actions
+                </th>
               </tr>
             </thead>
 
@@ -391,53 +377,52 @@ export default function AdminClient() {
                 return (
                   <tr key={r.id} className={r.disabled ? "opacity-60" : ""}>
                     <td className={td}>
-                      <div className="font-semibold">{r.preferred_name ?? "(No name)"}</div>
-                      {isDone ? (
-                        <div className="text-xs text-green-700">Ready (52 complete)</div>
-                      ) : needsAttention ? (
-                        <div className="text-xs text-red-700">
-                          Attention ({inactiveDays} days inactive)
-                        </div>
-                      ) : (
-                        <div className="text-xs opacity-70">-</div>
-                      )}
+                      <div className="break-words font-semibold leading-tight">
+                        {r.preferred_name ?? "(No name)"}
+                      </div>
+                      <div className="text-[11px] leading-tight">
+                        {isDone ? (
+                          <span className="text-green-700">Ready</span>
+                        ) : needsAttention ? (
+                          <span className="text-red-700">Attention</span>
+                        ) : (
+                          <span className="opacity-70">-</span>
+                        )}
+                      </div>
                     </td>
 
-                    <td className={td}>{r.email ?? "-"}</td>
+                    <td className={td}>
+                      <div className="break-words leading-tight">{r.email ?? "-"}</div>
+                    </td>
 
                     <td className={td}>
-                      <div className="text-sm">{r.percent_complete}%</div>
-                      <div className="text-xs opacity-70">{r.complete_count}/52 complete</div>
+                      <div className="leading-tight">{r.percent_complete}%</div>
+                      <div className="text-[11px] opacity-70 leading-tight">{r.complete_count}/52</div>
                     </td>
 
                     <td className={td}>{r.current_week ?? "-"}</td>
                     <td className={td}>{r.complete_count}</td>
                     <td className={td}>{r.in_progress_count}</td>
                     <td className={td}>{r.open_count}</td>
-                    <td className={td}>{formatDateTime(r.last_activity)}</td>
 
                     <td className={td}>
-                      <div className="text-xs">
-                        {r.email_paused ? (
-                          <span className="text-orange-700">Paused</span>
-                        ) : (
-                          <span className="text-green-700">Active</span>
-                        )}
-                      </div>
+                      <div className="leading-tight break-words">{formatDateTime(r.last_activity)}</div>
                     </td>
 
                     <td className={td}>
-                      <div className="text-xs">
-                        {r.disabled ? (
-                          <span className="text-red-700">Disabled</span>
-                        ) : (
-                          <span className="text-green-700">Enabled</span>
-                        )}
-                      </div>
+                      <span className={r.email_paused ? "text-orange-700" : "text-green-700"}>
+                        {r.email_paused ? "Paused" : "On"}
+                      </span>
                     </td>
 
                     <td className={td}>
-                      <div className="flex flex-col gap-2">
+                      <span className={r.disabled ? "text-red-700" : "text-green-700"}>
+                        {r.disabled ? "Off" : "On"}
+                      </span>
+                    </td>
+
+                    <td className={td}>
+                      <div className="flex flex-wrap gap-1">
                         <button className={btn} onClick={() => router.push(`/admin/user/${r.id}`)}>
                           View
                         </button>
@@ -461,16 +446,14 @@ export default function AdminClient() {
                             if (res.ok) await fetchOverview();
                           }}
                         >
-                          {r.email_paused ? "Resume emails" : "Pause emails"}
+                          {r.email_paused ? "Resume" : "Pause"}
                         </button>
 
                         <button
                           className={btn}
                           onClick={async () => {
                             const ok = window.confirm(
-                              r.disabled
-                                ? "Enable this user?"
-                                : "Disable this user? They will be blocked from the app."
+                              r.disabled ? "Enable this user?" : "Disable this user? They will be blocked from the app."
                             );
                             if (!ok) return;
 
@@ -483,7 +466,7 @@ export default function AdminClient() {
                             if (res.ok) await fetchOverview();
                           }}
                         >
-                          {r.disabled ? "Enable user" : "Disable user"}
+                          {r.disabled ? "Enable" : "Disable"}
                         </button>
                       </div>
                     </td>
@@ -493,7 +476,7 @@ export default function AdminClient() {
 
               {sorted.length === 0 ? (
                 <tr>
-                  <td className="p-6 text-sm opacity-70" colSpan={11}>
+                  <td className="p-4 text-xs opacity-70" colSpan={11}>
                     No users found for this filter.
                   </td>
                 </tr>
@@ -503,7 +486,7 @@ export default function AdminClient() {
         </div>
       </div>
 
-      <div className="text-xs opacity-60">Tip: click column headers to sort.</div>
+      <div className="text-[11px] opacity-60">Tip: click column headers to sort.</div>
     </div>
   );
 }
