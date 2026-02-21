@@ -1,39 +1,62 @@
 import { createClient } from "@supabase/supabase-js";
 
-function getBearerToken(req: Request) {
-  const authHeader = req.headers.get("authorization") || "";
-  if (!authHeader.startsWith("Bearer ")) return null;
-  const token = authHeader.replace("Bearer ", "").trim();
-  return token.length ? token : null;
+type AdminCheck =
+  | { ok: true; userId: string }
+  | { ok: false; status: number; error: string };
+
+function mustEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var: ${name}`);
+  return v;
 }
 
-export async function requireAdmin(req: Request) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+function getBearerToken(req: Request) {
+  const h = req.headers.get("authorization") || req.headers.get("Authorization") || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m?.[1] ?? null;
+}
 
-  if (!url || !anonKey) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
-  }
-
+export async function requireAdmin(req: Request): Promise<AdminCheck> {
   const token = getBearerToken(req);
   if (!token) {
-    return { ok: false as const, status: 401, error: "Missing bearer token" };
+    return { ok: false, status: 401, error: "Missing bearer token" };
   }
 
-  const callerClient = createClient(url, anonKey, {
-    auth: { persistSession: false },
-    global: { headers: { Authorization: `Bearer ${token}` } }
+  const url = mustEnv("NEXT_PUBLIC_SUPABASE_URL");
+  const anon = mustEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+
+  // Use anon key to validate the user token
+  const supabase = createClient(url, anon, {
+    auth: { persistSession: false, autoRefreshToken: false }
   });
 
-  const { data: userRes, error: userErr } = await callerClient.auth.getUser();
-  if (userErr || !userRes?.user) {
-    return { ok: false as const, status: 401, error: "Invalid session" };
+  const { data: userRes, error: userErr } = await supabase.auth.getUser(token);
+
+  if (userErr || !userRes?.user?.id) {
+    return { ok: false, status: 401, error: "Invalid session" };
   }
 
-  const { data: isAdmin, error: adminErr } = await callerClient.rpc("is_admin");
-  if (adminErr || !isAdmin) {
-    return { ok: false as const, status: 403, error: "Not authorized" };
+  const userId = userRes.user.id;
+
+  // Now check admin_users using the SERVICE ROLE (server-only)
+  const service = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
+  const adminDb = createClient(url, service, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+
+  const { data: adminRow, error: adminErr } = await adminDb
+    .from("admin_users")
+    .select("user_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (adminErr) {
+    return { ok: false, status: 500, error: adminErr.message };
   }
 
-  return { ok: true as const, callerUserId: userRes.user.id };
+  if (!adminRow) {
+    return { ok: false, status: 403, error: "Admin access required" };
+  }
+
+  return { ok: true, userId };
 }
